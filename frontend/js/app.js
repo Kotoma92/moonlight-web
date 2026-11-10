@@ -3903,6 +3903,8 @@ export const MoonlightApp = {
             mic: viewOpts.playerMode !== true && result.mic === true,
             // How it sounds (Settings → Microphone sound): MIC_QUALITY's name.
             micQuality: streamingSettings.mic_quality,
+            // Mute when in background: silence stream sound when the window is inactive.
+            muteInBackground: streamingSettings.mute_in_background === true,
             // The virtual display drawn by another GPU than the display it
             // replaced, when the host says so: the view tells the user to
             // restart a stuttering app, once the stream shows the stall —

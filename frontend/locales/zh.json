@@ -470,6 +470,8 @@
         "tearingDesc": "关闭垂直同步以略微降低延迟；可能导致画面撕裂。",
         "muteHost": "静音主机音频",
         "muteHostDesc": "串流时静音主机电脑扬声器。音频仍会发送到本设备。",
+        "muteInBackground": "后台静音",
+        "muteInBackgroundDesc": "当此窗口未激活或处于后台时，静音来自串流的声音。",
         "audioSource": "串流音频来源",
         "audioSourceDesc": "“自动”只串流你在被串流屏幕上正在使用的应用，并在你切换时跟随，其他应用的声音只在主机上播放。也可以选择一个有声音的应用。下次串流时生效。",
         "audioSourceUnsupported": "只串流单个应用需要 Windows 11 主机。当前串流所有应用。",
