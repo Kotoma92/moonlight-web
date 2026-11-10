@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -314,7 +315,7 @@ public:
     // Aspect ratio used to derive width from a fixed height. Stored as JSON
     // string "stream_aspect", default "auto" (the browser measures the host's
     // real format at stream start and relaunches with it). Manual overrides:
-    // "16:9", "16:10", "21:9", "4:3", "3:2", "32:9", "5:4".
+    // "window", "16:9", "16:10", "21:9", "4:3", "3:2", "32:9", "5:4".
 
     QString streamAspect() const;
     void setStreamAspect(const QString& aspect);
@@ -691,6 +692,10 @@ public:
     /// Default: true (recommended — enables direct P2P connections from outside LAN).
     bool upnpEnabled() const;
     void setUpnpEnabled(bool enabled);
+
+    /// Base UDP port for WebRTC media streams (default: 48550).
+    /// Each stream slot binds mediaBasePort + slot.
+    uint16_t mediaBasePort() const;
 
     // ── Router ports (sticky UPnP allocation) ──────────────────────────────────
     //

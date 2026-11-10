@@ -20,6 +20,7 @@
 #include "common/Edition.h"
 #include "common/Logger.h"
 #include "common/PairingCrypto.h"
+#include "network/RouterPortPools.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -478,6 +479,10 @@ void AppSettings::seedDocumentedDefaults()
         obj["stream_worker_enabled"] = true;
         changed = true;
     }
+    if (!obj.contains("media_base_port")) {
+        obj["media_base_port"] = static_cast<int>(mw::routerports::kMediaBasePort);
+        changed = true;
+    }
     if (!obj.contains("native_host_enabled")) {
         obj["native_host_enabled"] = true;
         changed = true;
@@ -626,7 +631,8 @@ void AppSettings::setStreamAspect(const QString& aspect)
     // "auto" = the client probes the host's real format from the black bars
     // Sunshine encodes and asks again with it; the explicit ratios are manual
     // overrides, ordered by market share in the Settings dropdown.
-    const QStringList valid = {"auto", "16:9", "16:10", "21:9", "4:3", "3:2", "32:9", "5:4"};
+    const QStringList valid = {"auto", "window", "16:9", "16:10", "21:9",
+                               "4:3",  "3:2",    "32:9", "5:4"};
     obj["stream_aspect"] = valid.contains(aspect) ? aspect : QStringLiteral("auto");
     writeAll(obj);
 }
@@ -1313,6 +1319,17 @@ void AppSettings::setUpnpEnabled(bool enabled)
     QJsonObject obj = readAll();
     obj["upnp_enabled"] = enabled;
     writeAll(obj);
+}
+
+uint16_t AppSettings::mediaBasePort() const
+{
+    const int kDefault = static_cast<int>(mw::routerports::kMediaBasePort);
+    const int port = readAll().value("media_base_port").toInt(kDefault);
+    const int maxBase = 65535 - mw::routerports::kMediaPortCount + 1;
+    if (port < 1024 || port > maxBase) {
+        return mw::routerports::kMediaBasePort;
+    }
+    return static_cast<uint16_t>(port);
 }
 
 // ── Internet Access ───────────────────────────────────────────────────────────

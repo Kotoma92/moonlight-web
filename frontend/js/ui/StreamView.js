@@ -38,7 +38,7 @@ import {
     measureRefreshRate,
     onRefreshRateChange,
 } from '../util/RefreshRate.js';
-import { devicePixelSize } from '../util/StreamResolution.js';
+import { devicePixelSize, windowPixelSize } from '../util/StreamResolution.js';
 import { PeriodicStallDetector } from '../stream/PeriodicStallDetector.js';
 import { GamepadManager } from '../stream/GamepadManager.js';
 import { HidPassthrough } from '../hid/HidPassthrough.js';
@@ -580,6 +580,11 @@ export class StreamView {
         this._quitAppOnStop = opts.quitAppOnStop === true;
         // "Start streams in fullscreen" (settings) — see _applyFullscreenOnStart.
         this._fullscreenOnStart = opts.fullscreenOnStart === true;
+        // "Mute when in background" (settings). Mutes stream sound when this
+        // window is not active on the client machine.
+        this._muteInBackground = opts.muteInBackground === true;
+        this._isWindowActive =
+            typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true;
         // Backend stream slot this view runs on (0 = /ws ports, 1 = /ws1) and
         // the uniqueid it launched with — quit() scopes its /quit with them so
         // retiring one leg of a dual stream never cancels the other.
@@ -1262,6 +1267,7 @@ export class StreamView {
         // onClientScreenChanged, which relaunches at the new size.
         this._offScreenChange = null;
         this._screenSizeSeen = null;
+        this._streamAspect = opts.streamAspect || opts.aspectChoice || 'auto';
         this.onClientScreenChanged = null;
         // The host heals a lost frame with a delta (NVENC reference
         // invalidation, /start says so): after a gap this view names the
@@ -1738,11 +1744,18 @@ export class StreamView {
         this._composedKey = null;
         this._onPaste = (e) => this.handlePaste(e);
         this._onPointerDownFlush = () => this._flushPendingClipboard();
-        this._onWindowBlur = () => this._releaseAllPhysKeys();
+        this._onWindowBlur = (e) => {
+            if (e && e.target && e.target !== window && e.target !== document) return;
+            this._releaseAllPhysKeys();
+            this._setWindowActive(false);
+        };
         // Regaining window focus (Alt-Tab back from another app) may leave the
         // pointer over the streamed picture without a mousemove — re-apply the
         // cursor hide so the local arrow doesn't double the host cursor.
-        this._onWindowFocus = () => this._refreshLocalCursorOnFocus();
+        this._onWindowFocus = () => {
+            this._setWindowActive(true);
+            this._refreshLocalCursorOnFocus();
+        };
         this._onMouseMove = (e) => this.handleMouseMove(e);
         this._onMouseDown = (e) => this.handleMouseDown(e);
         this._onMouseUp = (e) => this.handleMouseUp(e);
@@ -1892,8 +1905,10 @@ export class StreamView {
             if (document.visibilityState === 'hidden') {
                 this._releaseAllPhysKeys();
                 this._touchPadLetGo();
+                this._setWindowActive(false);
             }
             if (document.visibilityState === 'visible' && !this._quitting) {
+                this._setWindowActive(true);
                 this._resyncAfterHidden();
                 // Coming back to the tab may leave the pointer over the picture
                 // without a mousemove — re-hide the local cursor (double cursor).
@@ -2190,6 +2205,7 @@ export class StreamView {
         const ok = await this.audioPipeline.init();
         if (ok) {
             console.log('[StreamView] AudioPipeline ready');
+            this._applyVolume();
             // Resume if the context was suspended (autoplay policy).
             // StreamView is created after a user click, so this usually succeeds.
             if (this.audioPipeline.context && this.audioPipeline.context.state === 'suspended') {
@@ -2383,6 +2399,7 @@ export class StreamView {
             // Standby: muted until promote (no double audio with the live view).
             if (this._standby) this.audioEl.muted = true;
             if (this._nativeAudio && this.webrtc) this.webrtc.audioElement = this.audioEl;
+            this._applyVolume();
         }
 
         // Transparent input-capture layer covering the whole canvas/video area.
@@ -6309,11 +6326,15 @@ export class StreamView {
     // rotation reports two or three intermediate sizes on its way.
     _startScreenWatch() {
         if (this._offScreenChange) return;
-        this._screenSizeSeen = devicePixelSize();
+        const readSize = () =>
+            this._streamAspect === 'window'
+                ? windowPixelSize() || devicePixelSize()
+                : devicePixelSize();
+        this._screenSizeSeen = readSize();
         let timer = null;
         const check = () => {
             timer = null;
-            const now = devicePixelSize();
+            const now = readSize();
             const seen = this._screenSizeSeen;
             if (!now || (seen && now.width === seen.width && now.height === seen.height)) return;
             this._screenSizeSeen = now;
@@ -6631,9 +6652,29 @@ export class StreamView {
         return streamVolume.outputLevel() === 0;
     }
 
+    get muteInBackground() {
+        return this._muteInBackground;
+    }
+
+    set muteInBackground(enabled) {
+        const next = enabled === true;
+        if (this._muteInBackground === next) return;
+        this._muteInBackground = next;
+        this._applyVolume();
+    }
+
+    _setWindowActive(active) {
+        if (this._isWindowActive === active) return;
+        this._isWindowActive = active;
+        if (this._muteInBackground) {
+            this._applyVolume();
+        }
+    }
+
     /** Send the stream volume to whatever plays this view's audio, and redraw the control. */
     _applyVolume() {
-        const out = streamVolume.outputLevel();
+        const bgMuted = this._muteInBackground && !this._isWindowActive;
+        const out = bgMuted ? 0 : streamVolume.outputLevel();
         if (this.audioEl) this.audioEl.volume = out;
         if (this.audioPipeline) this.audioPipeline.setVolume(out);
         // A phone or a tablet has no control to redraw, but the shortcut

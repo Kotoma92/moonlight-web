@@ -96,6 +96,7 @@ import {
     fitPixelBudget,
     autoMaxHeightFor,
     readResolutionChoice,
+    windowPixelSize,
 } from '../util/StreamResolution.js';
 import { previewCeiling } from '../util/AutoCeiling.js';
 import {
@@ -189,6 +190,7 @@ export class SettingsView {
         this._hdrEnabled = false;
         this._chroma444 = false;
         this._muteHostAudio = true;
+        this._muteInBackground = false;
         // Which sound the stream carries (audioSourceOptions.js): 'all' (default,
         // as an OS behaves), 'focused' (Automatic: the app in focus, a game) or
         // 'app:<exe>'. The host says whether it can (Windows 11 native host);
@@ -685,6 +687,7 @@ export class SettingsView {
         this._hdrEnabled = data.hdr_enabled === true;
         this._chroma444 = data.chroma_444_enabled === true;
         this._muteHostAudio = data.mute_host_audio !== false;
+        this._muteInBackground = data.mute_in_background === true;
         this._audioSource = normalizeAudioSource(data.audio_source);
         this._micEnabled = micRequested(data);
         this._micChosen = data.mic_chosen === true;
@@ -829,11 +832,17 @@ export class SettingsView {
             IS_TV,
             autoMaxHeightFor(budget),
         );
-        const aspect =
-            choice.mode === 'fixed'
-                ? this.container.querySelector('#settings-stream-aspect')?.value ||
-                  this._streamAspect
-                : ref.aspect;
+        const chosenAspect =
+            this.container.querySelector('#settings-stream-aspect')?.value || this._streamAspect;
+        let aspect = ref.aspect;
+        if (chosenAspect && chosenAspect !== 'auto') {
+            if (chosenAspect === 'window') {
+                const win = windowPixelSize();
+                aspect = win ? `${win.width}:${win.height}` : ref.aspect;
+            } else {
+                aspect = chosenAspect;
+            }
+        }
         const size = { height: ref.height, aspect };
         if (choice.mode !== 'auto' && rateNamed) return { size, fps: rate };
         const bounded = fitPixelBudget(size, rate, {
@@ -1015,17 +1024,13 @@ export class SettingsView {
             stream_resolution: this._streamResolution,
             stream_custom_width: this._customWidth,
             stream_custom_height: this._customHeight,
-            // Auto, always, outside a debug build — see _applySettings. A
-            // ratio a debug build forces is marked as such, which is what
-            // app.js looks for before honouring a stored ratio at launch.
-            stream_aspect: this._debugBuild ? this._streamAspect : 'auto',
-            ...(this._debugBuild && this._streamAspect !== 'auto'
-                ? { stream_aspect_forced: true }
-                : {}),
+            stream_aspect: this._streamAspect,
+            ...(this._streamAspect !== 'auto' ? { stream_aspect_forced: true } : {}),
             stream_fps: this._streamFps,
             hdr_enabled: this._hdrEnabled,
             chroma_444_enabled: this._chroma444,
             mute_host_audio: this._muteHostAudio,
+            mute_in_background: this._muteInBackground,
             audio_source: this._audioSource,
             seamless_switching: true,
             touch_sensitivity: this._touchSensitivity,
@@ -1550,6 +1555,9 @@ export class SettingsView {
             const hdr = this.container.querySelector('#settings-hdr')?.checked ?? this._hdrEnabled;
             const chroma444 =
                 this.container.querySelector('#settings-chroma-444')?.checked ?? this._chroma444;
+            const muteInBackground =
+                this.container.querySelector('#settings-mute-in-background')?.checked ??
+                this._muteInBackground;
             const sensRaw = parseFloat(
                 this.container.querySelector('#settings-sensitivity')?.value,
             );
@@ -1595,6 +1603,7 @@ export class SettingsView {
             this._streamFps = fps;
             this._hdrEnabled = hdr;
             this._chroma444 = chroma444;
+            this._muteInBackground = muteInBackground;
             this._touchSensitivity = sensitivity;
             this._mouseSensitivity = mouseSensitivity;
             this._touchScreen = touchScreen;
@@ -1628,6 +1637,7 @@ export class SettingsView {
         this._hdrEnabled = false;
         this._chroma444 = false;
         this._muteHostAudio = true;
+        this._muteInBackground = false;
         this._micEnabled = true;
         this._micChosen = false;
         this._micDevice = null;
@@ -1947,20 +1957,18 @@ export class SettingsView {
                         </div>`
                 : '';
 
-        // Aspect: Auto for everyone — the resolution choices above fix the
-        // shape, and a forced ratio was the harder thing to understand. The
-        // dropdown ("Auto", then the real screen formats, most common first)
-        // exists in debug builds only, where the mechanism is kept for tests.
-        if (!this._debugBuild) this._streamAspect = 'auto';
-        const aspectOptions = [{ value: 'auto', label: t('settings.aspectAuto') }]
+        // Aspect: Auto (screen), Window, or fixed standard ratios.
+        const aspectOptions = [
+            { value: 'auto', label: t('settings.aspectAuto') },
+            { value: 'window', label: t('settings.aspectWindow') },
+        ]
             .concat(SCREEN_ASPECTS.map((a) => ({ value: a.value, label: a.value })))
             .map(
                 (a) =>
                     `<option value="${a.value}" ${a.value === this._streamAspect ? 'selected' : ''}>${this.esc(a.label)}</option>`,
             )
             .join('');
-        const aspectHtml = this._debugBuild
-            ? `
+        const aspectHtml = `
                     <div class="settings-field">
                         <label class="settings-label" for="settings-stream-aspect">
                             ${t('settings.streamAspect')}
@@ -1969,8 +1977,7 @@ export class SettingsView {
                         <select id="settings-stream-aspect" class="settings-select">
                             ${aspectOptions}
                         </select>
-                    </div>`
-            : '';
+                    </div>`;
 
         // FPS options. Auto first and default: the rate this very screen
         // refreshes at, which is also what the native host's virtual display
@@ -2195,6 +2202,17 @@ export class SettingsView {
                             </span>
                         </label>
                         <span class="setting-desc">${t('settings.muteHostDesc')}</span>
+                    </div>
+
+                    <div class="settings-field">
+                        <label class="settings-checkbox-label">
+                            <input type="checkbox" id="settings-mute-in-background"
+                                ${this._muteInBackground ? 'checked' : ''} />
+                            <span class="settings-checkbox-text">
+                                <strong>${t('settings.muteInBackground')}</strong>
+                            </span>
+                        </label>
+                        <span class="setting-desc">${t('settings.muteInBackgroundDesc')}</span>
                     </div>
 
                     <div class="settings-field${this._audioSourceSupported ? '' : ' settings-field-locked'}">
@@ -2682,12 +2700,10 @@ export class SettingsView {
         const heightSelect = this.container.querySelector('#settings-stream-height');
         if (heightSelect)
             heightSelect.addEventListener('change', () => {
-                // Any choice fixes the shape on its own: the ratio goes to
-                // Auto with it (the debug-only dropdown follows on re-render).
-                this._streamAspect = 'auto';
+                const choice = this._readResolutionChoice();
+                if (choice.mode === 'custom') this._streamAspect = 'auto';
                 this._applyAutoBitrate();
                 this._syncAutoFpsLabel();
-                const choice = this._readResolutionChoice();
                 const custom = choice.mode === 'custom';
                 const showing = !!this.container.querySelector('#settings-custom-width');
                 this._autoSave();
@@ -2780,6 +2796,13 @@ export class SettingsView {
         if (muteHostCheck)
             muteHostCheck.addEventListener('change', () => {
                 this._muteHostAudio = muteHostCheck.checked;
+                this._autoSave();
+            });
+
+        const muteInBackgroundCheck = this.container.querySelector('#settings-mute-in-background');
+        if (muteInBackgroundCheck)
+            muteInBackgroundCheck.addEventListener('change', () => {
+                this._muteInBackground = muteInBackgroundCheck.checked;
                 this._autoSave();
             });
 
