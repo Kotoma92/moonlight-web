@@ -189,6 +189,7 @@ export class SettingsView {
         this._hdrEnabled = false;
         this._chroma444 = false;
         this._muteHostAudio = true;
+        this._muteInBackground = false;
         // Which sound the stream carries (audioSourceOptions.js): 'all' (default,
         // as an OS behaves), 'focused' (Automatic: the app in focus, a game) or
         // 'app:<exe>'. The host says whether it can (Windows 11 native host);
@@ -703,6 +704,7 @@ export class SettingsView {
         this._hdrEnabled = data.hdr_enabled === true;
         this._chroma444 = data.chroma_444_enabled === true;
         this._muteHostAudio = data.mute_host_audio !== false;
+        this._muteInBackground = data.mute_in_background === true;
         this._audioSource = normalizeAudioSource(data.audio_source);
         this._micEnabled = micRequested(data);
         this._micChosen = data.mic_chosen === true;
@@ -1082,6 +1084,7 @@ export class SettingsView {
             hdr_enabled: this._hdrEnabled,
             chroma_444_enabled: this._chroma444,
             mute_host_audio: this._muteHostAudio,
+            mute_in_background: this._muteInBackground,
             audio_source: this._audioSource,
             seamless_switching: true,
             touch_sensitivity: this._touchSensitivity,
@@ -1660,6 +1663,9 @@ export class SettingsView {
             const hdr = this.container.querySelector('#settings-hdr')?.checked ?? this._hdrEnabled;
             const chroma444 =
                 this.container.querySelector('#settings-chroma-444')?.checked ?? this._chroma444;
+            const muteInBackground =
+                this.container.querySelector('#settings-mute-in-background')?.checked ??
+                this._muteInBackground;
             const sensRaw = parseFloat(
                 this.container.querySelector('#settings-sensitivity')?.value,
             );
@@ -1705,6 +1711,7 @@ export class SettingsView {
             this._streamFps = fps;
             this._hdrEnabled = hdr;
             this._chroma444 = chroma444;
+            this._muteInBackground = muteInBackground;
             this._touchSensitivity = sensitivity;
             this._mouseSensitivity = mouseSensitivity;
             this._touchScreen = touchScreen;
@@ -1738,6 +1745,7 @@ export class SettingsView {
         this._hdrEnabled = false;
         this._chroma444 = false;
         this._muteHostAudio = true;
+        this._muteInBackground = false;
         this._micEnabled = true;
         this._micChosen = false;
         this._micDevice = null;
@@ -2307,6 +2315,16 @@ export class SettingsView {
                         <span class="setting-desc">${t('settings.muteHostDesc')}</span>
                     </div>
 
+                    <div class="settings-field">
+                        <label class="settings-checkbox-label">
+                            <input type="checkbox" id="settings-mute-in-background"
+                                ${this._muteInBackground ? 'checked' : ''} />
+                            <span class="settings-checkbox-text">
+                                <strong>${t('settings.muteInBackground')}</strong>
+                            </span>
+                        </label>
+                        <span class="setting-desc">${t('settings.muteInBackgroundDesc')}</span>
+                    </div>
                     <div class="settings-field${micSupported() ? '' : ' settings-field-locked'}">
                         <label class="settings-label" for="settings-mic-device">
                             ${t('settings.micDevice')}
@@ -2863,6 +2881,13 @@ export class SettingsView {
         if (muteHostCheck)
             muteHostCheck.addEventListener('change', () => {
                 this._muteHostAudio = muteHostCheck.checked;
+                this._autoSave();
+            });
+
+        const muteInBackgroundCheck = this.container.querySelector('#settings-mute-in-background');
+        if (muteInBackgroundCheck)
+            muteInBackgroundCheck.addEventListener('change', () => {
+                this._muteInBackground = muteInBackgroundCheck.checked;
                 this._autoSave();
             });
 
