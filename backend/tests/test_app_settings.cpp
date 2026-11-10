@@ -141,6 +141,8 @@ void run_app_settings_tests()
     // String round-trips.
     s.setStreamAspect("21:9");
     CHECK_EQ(s.streamAspect(), QString("21:9"));
+    s.setStreamAspect("window");
+    CHECK_EQ(s.streamAspect(), QString("window"));
     s.setVideoEnhancement("on");
     CHECK_EQ(s.videoEnhancement(), QString("on"));
     s.setVideoEnhancementAlgo("fsr1");
