@@ -96,6 +96,7 @@ import {
     fitPixelBudget,
     autoMaxHeightFor,
     readResolutionChoice,
+    windowPixelSize,
 } from '../util/StreamResolution.js';
 import { previewCeiling } from '../util/AutoCeiling.js';
 import {
@@ -831,11 +832,17 @@ export class SettingsView {
             IS_TV,
             autoMaxHeightFor(budget),
         );
-        const aspect =
-            choice.mode === 'fixed'
-                ? this.container.querySelector('#settings-stream-aspect')?.value ||
-                  this._streamAspect
-                : ref.aspect;
+        const chosenAspect =
+            this.container.querySelector('#settings-stream-aspect')?.value || this._streamAspect;
+        let aspect = ref.aspect;
+        if (chosenAspect && chosenAspect !== 'auto') {
+            if (chosenAspect === 'window') {
+                const win = windowPixelSize();
+                aspect = win ? `${win.width}:${win.height}` : ref.aspect;
+            } else {
+                aspect = chosenAspect;
+            }
+        }
         const size = { height: ref.height, aspect };
         if (choice.mode !== 'auto' && rateNamed) return { size, fps: rate };
         const bounded = fitPixelBudget(size, rate, {
@@ -1017,13 +1024,8 @@ export class SettingsView {
             stream_resolution: this._streamResolution,
             stream_custom_width: this._customWidth,
             stream_custom_height: this._customHeight,
-            // Auto, always, outside a debug build — see _applySettings. A
-            // ratio a debug build forces is marked as such, which is what
-            // app.js looks for before honouring a stored ratio at launch.
-            stream_aspect: this._debugBuild ? this._streamAspect : 'auto',
-            ...(this._debugBuild && this._streamAspect !== 'auto'
-                ? { stream_aspect_forced: true }
-                : {}),
+            stream_aspect: this._streamAspect,
+            ...(this._streamAspect !== 'auto' ? { stream_aspect_forced: true } : {}),
             stream_fps: this._streamFps,
             hdr_enabled: this._hdrEnabled,
             chroma_444_enabled: this._chroma444,
@@ -1955,20 +1957,18 @@ export class SettingsView {
                         </div>`
                 : '';
 
-        // Aspect: Auto for everyone — the resolution choices above fix the
-        // shape, and a forced ratio was the harder thing to understand. The
-        // dropdown ("Auto", then the real screen formats, most common first)
-        // exists in debug builds only, where the mechanism is kept for tests.
-        if (!this._debugBuild) this._streamAspect = 'auto';
-        const aspectOptions = [{ value: 'auto', label: t('settings.aspectAuto') }]
+        // Aspect: Auto (screen), Window, or fixed standard ratios.
+        const aspectOptions = [
+            { value: 'auto', label: t('settings.aspectAuto') },
+            { value: 'window', label: t('settings.aspectWindow') },
+        ]
             .concat(SCREEN_ASPECTS.map((a) => ({ value: a.value, label: a.value })))
             .map(
                 (a) =>
                     `<option value="${a.value}" ${a.value === this._streamAspect ? 'selected' : ''}>${this.esc(a.label)}</option>`,
             )
             .join('');
-        const aspectHtml = this._debugBuild
-            ? `
+        const aspectHtml = `
                     <div class="settings-field">
                         <label class="settings-label" for="settings-stream-aspect">
                             ${t('settings.streamAspect')}
@@ -1977,8 +1977,7 @@ export class SettingsView {
                         <select id="settings-stream-aspect" class="settings-select">
                             ${aspectOptions}
                         </select>
-                    </div>`
-            : '';
+                    </div>`;
 
         // FPS options. Auto first and default: the rate this very screen
         // refreshes at, which is also what the native host's virtual display
@@ -2701,12 +2700,10 @@ export class SettingsView {
         const heightSelect = this.container.querySelector('#settings-stream-height');
         if (heightSelect)
             heightSelect.addEventListener('change', () => {
-                // Any choice fixes the shape on its own: the ratio goes to
-                // Auto with it (the debug-only dropdown follows on re-render).
-                this._streamAspect = 'auto';
+                const choice = this._readResolutionChoice();
+                if (choice.mode === 'custom') this._streamAspect = 'auto';
                 this._applyAutoBitrate();
                 this._syncAutoFpsLabel();
-                const choice = this._readResolutionChoice();
                 const custom = choice.mode === 'custom';
                 const showing = !!this.container.querySelector('#settings-custom-width');
                 this._autoSave();

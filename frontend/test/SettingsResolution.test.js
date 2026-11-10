@@ -94,51 +94,46 @@ describe('SettingsView resolution', () => {
         expect(view._estimateBitrate()).toBe(computeAutoBitrate(2160, '16:9', false, false));
     });
 
-    it('hides the ratio from a user, and shows it to a debug build', () => {
+    it('shows the ratio dropdown to all users', () => {
         view.render();
-        expect(view.container.querySelector('#settings-stream-aspect')).toBeNull();
-        view._debugBuild = true;
-        view.render();
-        expect(view.container.querySelector('#settings-stream-aspect')).not.toBeNull();
+        const select = view.container.querySelector('#settings-stream-aspect');
+        expect(select).not.toBeNull();
+        const values = Array.from(select.querySelectorAll('option')).map((o) => o.value);
+        expect(values).toContain('auto');
+        expect(values).toContain('window');
+        expect(values).toContain('16:9');
+        expect(values).toContain('21:9');
     });
 
-    // The 0.3.1 migration: a "4:3" forced under 0.3.0 is Auto from the next
-    // save on, and never marked as a deliberate override.
-    it('saves the ratio as Auto whatever was stored, outside a debug build', async () => {
+    it('saves a chosen standard ratio and marks it as forced', async () => {
         view._applySettings({ stream_aspect: '4:3', stream_height: 1440 });
         expect(view._streamAspect).toBe('4:3');
         view.render();
         view.bindEvents();
-        expect(view._streamAspect).toBe('auto');
-        await view._saveToStorage();
-        expect(stored().stream_aspect).toBe('auto');
-        expect(stored().stream_aspect_forced).toBeUndefined();
-        expect(stored().stream_height).toBe(1440);
-        // A store from before the choice existed is Auto, the rung kept.
-        expect(stored().stream_resolution).toBe('auto');
-    });
-
-    it('keeps a forced ratio in a debug build, and says so', async () => {
-        view._debugBuild = true;
-        view._applySettings({ stream_aspect: '4:3' });
-        view.render();
-        view.bindEvents();
+        expect(view._streamAspect).toBe('4:3');
         await view._saveToStorage();
         expect(stored().stream_aspect).toBe('4:3');
         expect(stored().stream_aspect_forced).toBe(true);
+        expect(stored().stream_height).toBe(1440);
+        expect(stored().stream_resolution).toBe('auto');
     });
 
-    it('puts the ratio back to Auto when a resolution is picked', async () => {
-        view._debugBuild = true;
-        view._applySettings({ stream_aspect: '4:3' });
+    it('saves window ratio and marks it as forced', async () => {
+        view._applySettings({ stream_aspect: 'window' });
         view.render();
         view.bindEvents();
-        await pick('device');
-        expect(view._streamAspect).toBe('auto');
+        await view._saveToStorage();
+        expect(stored().stream_aspect).toBe('window');
+        expect(stored().stream_aspect_forced).toBe(true);
+    });
+
+    it('saves auto ratio without forced flag', async () => {
+        view._applySettings({ stream_aspect: 'auto' });
+        view.render();
+        view.bindEvents();
+        await view._saveToStorage();
         expect(stored().stream_aspect).toBe('auto');
-        expect(stored().stream_resolution).toBe('device');
-        // The rung is kept for the day the user comes back to it.
-        expect(stored().stream_height).toBe(1080);
+        expect(stored().stream_aspect_forced).toBeUndefined();
     });
 
     it('shows the custom pair with its choice, pinned into bounds and even', async () => {

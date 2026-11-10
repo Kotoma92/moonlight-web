@@ -26,6 +26,7 @@ import {
     bitrateReference,
     clampCustomSize,
     devicePixelSize,
+    windowPixelSize,
     fitPixelBudget,
     nearlySameStreamSize,
     readResolutionChoice,
@@ -76,6 +77,31 @@ describe('devicePixelSize', () => {
     it('is null when there is no screen to read', () => {
         expect(devicePixelSize({})).toBeNull();
         expect(devicePixelSize({ screen: { width: 0, height: 0 } })).toBeNull();
+    });
+});
+
+describe('windowPixelSize', () => {
+    it('is the window viewport in physical pixels, even in both dimensions', () => {
+        expect(windowPixelSize({ innerWidth: 1280, innerHeight: 720, devicePixelRatio: 1 })).toEqual({
+            width: 1280,
+            height: 720,
+        });
+        expect(windowPixelSize({ innerWidth: 1000, innerHeight: 600, devicePixelRatio: 1.5 })).toEqual({
+            width: 1500,
+            height: 900,
+        });
+    });
+
+    it('rounds odd viewport pixels down to even', () => {
+        expect(windowPixelSize({ innerWidth: 999, innerHeight: 555, devicePixelRatio: 1 })).toEqual({
+            width: 998,
+            height: 554,
+        });
+    });
+
+    it('is null when there is no window size to read', () => {
+        expect(windowPixelSize({})).toBeNull();
+        expect(windowPixelSize({ innerWidth: 0, innerHeight: 0 })).toBeNull();
     });
 });
 
@@ -210,6 +236,36 @@ describe('resolveStreamSize', () => {
         );
         expect(pinned.height).toBe(CUSTOM_SIZE_MAX);
         expect(pinned.aspect).toBe(`${CUSTOM_SIZE_MIN}:${CUSTOM_SIZE_MAX}`);
+    });
+
+    it('locks aspect ratio when a fixed aspect ratio is chosen', () => {
+        // 16:9 on a 16:10 laptop screen (1920x1200) fits 1920x1080
+        const laptopScreen = { width: 1920, height: 1200 };
+        const autoSize = resolveStreamSize(
+            { mode: 'auto' },
+            { nativeHost: true, device: laptopScreen, aspect: '16:9' },
+        );
+        expect(autoSize.height).toBe(1080);
+        expect(autoSize.aspect).toBe('16:9');
+        expect(autoSize.fitBox).toBe(true);
+
+        // Fixed rung with 16:9
+        const fixedSize = resolveStreamSize(
+            { mode: 'fixed', height: 1440 },
+            { nativeHost: false, aspect: '16:9' },
+        );
+        expect(fixedSize.height).toBe(1440);
+        expect(fixedSize.aspect).toBe('16:9');
+    });
+
+    it('follows browser window dimensions when window aspect is chosen', () => {
+        const windowSize = { width: 1600, height: 900 };
+        const winSize = resolveStreamSize(
+            { mode: 'auto' },
+            { nativeHost: true, device: windowSize, aspect: 'window' },
+        );
+        expect(winSize.aspect).toBe('1600:900');
+        expect(winSize.followsScreen).toBe(true);
     });
 });
 

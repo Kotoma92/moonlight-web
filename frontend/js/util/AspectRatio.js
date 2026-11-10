@@ -37,8 +37,8 @@ export const SCREEN_ASPECTS = [
     { value: '5:4', ratio: 5 / 4 },
 ];
 
-/** Every ratio the backend and the Settings PATCH accept, "auto" included. */
-export const ASPECT_VALUES = ['auto', ...SCREEN_ASPECTS.map((a) => a.value)];
+/** Every ratio the backend and the Settings PATCH accept, "auto" and "window" included. */
+export const ASPECT_VALUES = ['auto', 'window', ...SCREEN_ASPECTS.map((a) => a.value)];
 
 /** Ratio the stream falls back to when nothing is known about the host. */
 export const DEFAULT_ASPECT = '16:9';

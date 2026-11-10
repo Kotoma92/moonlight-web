@@ -38,7 +38,7 @@ import {
     measureRefreshRate,
     onRefreshRateChange,
 } from '../util/RefreshRate.js';
-import { devicePixelSize } from '../util/StreamResolution.js';
+import { devicePixelSize, windowPixelSize } from '../util/StreamResolution.js';
 import { PeriodicStallDetector } from '../stream/PeriodicStallDetector.js';
 import { GamepadManager } from '../stream/GamepadManager.js';
 import { HidPassthrough } from '../hid/HidPassthrough.js';
@@ -1267,6 +1267,7 @@ export class StreamView {
         // onClientScreenChanged, which relaunches at the new size.
         this._offScreenChange = null;
         this._screenSizeSeen = null;
+        this._streamAspect = opts.streamAspect || opts.aspectChoice || 'auto';
         this.onClientScreenChanged = null;
         // The host heals a lost frame with a delta (NVENC reference
         // invalidation, /start says so): after a gap this view names the
@@ -6325,11 +6326,15 @@ export class StreamView {
     // rotation reports two or three intermediate sizes on its way.
     _startScreenWatch() {
         if (this._offScreenChange) return;
-        this._screenSizeSeen = devicePixelSize();
+        const readSize = () =>
+            this._streamAspect === 'window'
+                ? windowPixelSize() || devicePixelSize()
+                : devicePixelSize();
+        this._screenSizeSeen = readSize();
         let timer = null;
         const check = () => {
             timer = null;
-            const now = devicePixelSize();
+            const now = readSize();
             const seen = this._screenSizeSeen;
             if (!now || (seen && now.width === seen.width && now.height === seen.height)) return;
             this._screenSizeSeen = now;

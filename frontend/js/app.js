@@ -107,6 +107,7 @@ import {
     streamFootprint,
     tvOverAsk,
     devicePixelSize,
+    windowPixelSize,
     nearlySameStreamSize,
 } from './util/StreamResolution.js';
 import {
@@ -2522,6 +2523,11 @@ export const MoonlightApp = {
         if (!codecOverride || !this._autoCeiling) this._startAutoCeiling(host, streamingSettings);
         else this._autoCeiling.reopen();
         const choice = readResolutionChoice(streamingSettings);
+        const aspectChoice = streamingSettings.stream_aspect || 'auto';
+        this._aspectChoice = aspectChoice;
+        streamingSettings.stream_aspect_choice = aspectChoice;
+        const clientDevice =
+            aspectChoice === 'window' ? windowPixelSize() || devicePixelSize() : devicePixelSize();
         const sizeAt = (autoMaxHeight) =>
             resolveStreamSize(
                 {
@@ -2541,6 +2547,8 @@ export const MoonlightApp = {
                     // util/StreamResolution.js).
                     virtualDisplay: app?.isMadeForStream === true,
                     autoMaxHeight,
+                    device: clientDevice,
+                    aspect: aspectChoice,
                 },
             );
         this._fpsAuto = fpsAuto;
@@ -2564,7 +2572,8 @@ export const MoonlightApp = {
         // A gamescope session keeps the size it was started at (a new size
         // would only find it again, framed): turning the phone relaunches
         // nothing there.
-        this._sizeFollowsScreen = size.followsScreen && app?.isGamescope !== true;
+        this._sizeFollowsScreen =
+            (size.followsScreen || aspectChoice === 'window') && app?.isGamescope !== true;
         this._sizeOnVirtualDisplay = app?.isMadeForStream === true;
         // The ladder's session-only rung and bitrate outrank the choice: a
         // relaunch through here (a codec fallback under congestion) keeps
@@ -2576,25 +2585,26 @@ export const MoonlightApp = {
         // A bitrate the viewer set, under the administrator's ceiling.
         if (streamingSettings.stream_bitrate > 0)
             streamingSettings.stream_bitrate = limitBitrateKbps(streamingSettings.stream_bitrate);
-        // A stored ratio counts only when a debug build forced it and said so
-        // (SettingsView marks it): the dropdown left the product in 0.3.1, and
-        // a "4:3" a user forced before then is Auto from here on.
-        const chosenAspect =
-            streamingSettings.stream_aspect_forced === true
-                ? streamingSettings.stream_aspect
-                : 'auto';
-        if (size.aspect) {
-            streamingSettings.stream_aspect = size.aspect;
-            // The native host still states the shape it settled on, and that
-            // is worth remembering for the next fixed-rung launch.
-            this._aspectAuto = nativeHost;
+        if (aspectChoice === 'window') {
+            const win = clientDevice || { width: 1920, height: 1080 };
+            streamingSettings.stream_aspect = bounded.aspect || `${win.width}:${win.height}`;
+            streamingSettings.stream_aspect_forced = true;
+            this._aspectAuto = false;
+            streamingSettings.follow_display_shape = false;
+        } else if (aspectChoice !== 'auto') {
+            streamingSettings.stream_aspect = aspectChoice;
+            streamingSettings.stream_aspect_forced = true;
+            this._aspectAuto = false;
+            streamingSettings.follow_display_shape = false;
         } else {
-            this._aspectAuto = nativeHost || !chosenAspect || chosenAspect === 'auto';
-            streamingSettings.stream_aspect = this._aspectAuto
-                ? loadHostAspect(host.uuid) || DEFAULT_ASPECT
-                : chosenAspect;
+            this._aspectAuto = nativeHost;
+            if (size.aspect) {
+                streamingSettings.stream_aspect = size.aspect;
+            } else {
+                streamingSettings.stream_aspect = loadHostAspect(host.uuid) || DEFAULT_ASPECT;
+            }
+            streamingSettings.follow_display_shape = nativeHost;
         }
-        streamingSettings.follow_display_shape = nativeHost;
         console.log(
             '[MW] Resolution ' +
                 choice.mode +
@@ -3562,17 +3572,23 @@ export const MoonlightApp = {
      */
     _onClientScreenChanged(device) {
         if (!this._sizeFollowsScreen || this._nav.overlay !== 'streaming') return;
+        const settings = this._lastStreamingSettings;
+        const host = this._lastStreamHost;
+        if (!settings || !host) return;
+        const aspectChoice =
+            this._aspectChoice || settings.stream_aspect_choice || settings.stream_aspect || 'auto';
         if (this._standbyView || this._standbyLaunching || this._relaunching) {
             clearTimeout(this._screenRecheckTimer);
+            const recheckDevice =
+                aspectChoice === 'window'
+                    ? windowPixelSize() || devicePixelSize()
+                    : devicePixelSize();
             this._screenRecheckTimer = setTimeout(
-                () => this._onClientScreenChanged(devicePixelSize()),
+                () => this._onClientScreenChanged(recheckDevice),
                 SCREEN_RECHECK_MS,
             );
             return;
         }
-        const settings = this._lastStreamingSettings;
-        const host = this._lastStreamHost;
-        if (!settings || !host) return;
         const choice = readResolutionChoice(settings);
         const sizeAt = (autoMaxHeight) =>
             resolveStreamSize(
@@ -3589,6 +3605,7 @@ export const MoonlightApp = {
                     tv: IS_TV,
                     virtualDisplay: this._sizeOnVirtualDisplay === true,
                     autoMaxHeight,
+                    aspect: aspectChoice,
                 },
             );
         const size = sizeAt(autoMaxHeightFor(this._autoCeilingBudget()));
@@ -3905,6 +3922,11 @@ export const MoonlightApp = {
             micQuality: streamingSettings.mic_quality,
             // Mute when in background: silence stream sound when the window is inactive.
             muteInBackground: streamingSettings.mute_in_background === true,
+            streamAspect:
+                streamingSettings.stream_aspect_choice ||
+                this._aspectChoice ||
+                streamingSettings.stream_aspect ||
+                'auto',
             // The virtual display drawn by another GPU than the display it
             // replaced, when the host says so: the view tells the user to
             // restart a stuttering app, once the stream shows the stall —
