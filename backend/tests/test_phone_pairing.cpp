@@ -121,6 +121,11 @@ void testTheVectorThePageShares()
                         "0000000b686f73742d6b65792d6964"
                         "000000104162436445664768496a4b6c4d6e4f70"
                         "00000004484a4453"));
+    // The refusal, framed the same way without a code (pairRefusalMessage).
+    CHECK_EQ(PhonePairing::refuseMessage(kHostId, id).toHex(),
+             QByteArray("000000114d572d504149522d76317c726566757365"
+                        "0000000b686f73742d6b65792d6964"
+                        "000000104162436445664768496a4b6c4d6e4f70"));
 }
 
 void testWhatEachSignatureIsFor()
@@ -483,12 +488,16 @@ void testAnApproverTakesWhatItApprovedAlong()
     CHECK(!auth.validateSession(stick));
     CHECK(auth.validateSession(laptop));
 
-    // Logging out is a session ending too.
+    // Logging out is not a revocation: what the session approved stays, now
+    // the administrator's.
     const QString owner = auth.createSession("192.168.1.21", "Owner");
     const QString box = auth.createSession("192.168.1.176", "Box");
     CHECK(auth.setSessionApprover(box, auth.sessionIdForToken(owner)));
     CHECK(auth.logoutSession(owner));
-    CHECK(!auth.validateSession(box));
+    CHECK(!auth.validateSession(owner));
+    CHECK(auth.validateSession(box));
+    CHECK(auth.sessionForToken(box).approvedBy.isEmpty());
+    auth.destroySession(auth.sessionIdForToken(box));
     auth.destroySession(auth.sessionIdForToken(laptop));
 }
 

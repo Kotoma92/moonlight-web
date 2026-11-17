@@ -478,6 +478,7 @@ if (ui.forget) {
         if (!paintedHostId) return;
         forgetInstance(paintedHostId);
         forgotten = true;
+        dropOverdue();
         paintForget(false);
         if (ui.note) ui.note.textContent = 'Removed from this browser’s list of machines.';
         paintInstances(true);
@@ -809,6 +810,53 @@ function clearUpdatePending() {
     }
 }
 
+/* ── An attempt that ran out of time ───────────────────────────────────────
+ *
+ * A call that passes its deadline is reported as a failure, and nothing stops
+ * it: on a slow network — a phone on weak 5G — its channel can open a few
+ * seconds later. It used to be left to itself. It then opened under a page that
+ * had moved on to waiting for its next try, wrote "Connected." over the
+ * failure, and went nowhere: the page had to be reloaded (11/11/2026).
+ *
+ * Such an attempt is now set aside, silent, until the next try. If it opens
+ * before then, it is the connection, and the start carries on with it. If it
+ * has not, it is put down as the next try starts: one call at a time.
+ */
+let overdueTunnel = null;
+
+/** Put down whatever attempt was set aside. */
+function dropOverdue() {
+    if (overdueTunnel) overdueTunnel.close();
+    overdueTunnel = null;
+}
+
+/** A failed attempt: put down, unless it only ran out of time (see above). */
+function setAside(tunnel) {
+    dropOverdue();
+    if (!tunnel.overdue) {
+        tunnel.close();
+        return;
+    }
+    tunnel.onstatus = null;
+    overdueTunnel = tunnel;
+}
+
+/** The attempt set aside, if and when its channel opens; never settled otherwise. */
+function overdueOpens() {
+    const tunnel = overdueTunnel;
+    return new Promise((resolve) => {
+        if (!tunnel) return;
+        const take = () => {
+            if (overdueTunnel !== tunnel) return;
+            overdueTunnel = null;
+            tunnel.onlate = null;
+            resolve(tunnel);
+        };
+        if (tunnel.connected) take();
+        else tunnel.onlate = take;
+    });
+}
+
 /**
  * Connect, and while an update this tab started is under way, keep trying.
  *
@@ -839,6 +887,7 @@ async function connectThroughUpdate(hostId) {
         } catch (e) {
             if (Date.now() >= waitUntil) {
                 clearUpdatePending();
+                setAside(tunnel);
                 throw e;
             }
             // A failed attempt can leave its relay socket or peer connection
@@ -1044,13 +1093,15 @@ async function connectThroughRestart(hostId, first) {
             const pause = PASSING_PAUSES_MS[Math.min(i, PASSING_PAUSES_MS.length - 1)];
             if (Date.now() + pause > giveUpAt) break;
             await sleep(pause);
+            // One call at a time, whatever the last one left behind.
+            dropOverdue();
             if (forgotten) return null;
             const tunnel = new Tunnel(hostId);
             try {
                 await tunnel.connect();
                 return tunnel;
             } catch (e) {
-                tunnel.close();
+                setAside(tunnel);
                 last = e;
                 if (!e.transient) break;
                 // The words can change underneath — the server back, the
@@ -1072,6 +1123,7 @@ async function connectWhenReachable(hostId, first, startedAt) {
     let last = first;
     if (last.answered) answered = true;
     if (!mayPass(last)) {
+        dropOverdue();
         fail(last.message, failureHint(last));
         return null;
     }
@@ -1083,7 +1135,10 @@ async function connectWhenReachable(hostId, first, startedAt) {
     let watchUntil = startedAt + WATCH_MS;
     let slow = 0;
     for (;;) {
-        if (forgotten) return null;
+        if (forgotten) {
+            dropOverdue();
+            return null;
+        }
         const seen = onlineCount;
         const updating =
             openedHere &&
@@ -1094,8 +1149,18 @@ async function connectWhenReachable(hostId, first, startedAt) {
             : WATCH_PAUSES_MS[Math.min(slow, WATCH_PAUSES_MS.length - 1)];
         const due = Date.now() + pause <= watchUntil;
         if (!due) sayNote(`${failureHint(last)} ${WATCH_OVER_NOTE}`);
-        await waitForNextTry(due ? pause : Infinity, seen);
-        if (forgotten) return null;
+        // The wait ends early if the attempt that ran out of time opens after all.
+        const late = await Promise.race([
+            waitForNextTry(due ? pause : Infinity, seen),
+            overdueOpens(),
+        ]);
+        if (forgotten) {
+            dropOverdue();
+            if (late) late.close();
+            return null;
+        }
+        if (late) return late;
+        dropOverdue();
         if (!due) {
             // The network came back after the half hour: another one.
             watchUntil = Date.now() + WATCH_MS;
@@ -1110,11 +1175,15 @@ async function connectWhenReachable(hostId, first, startedAt) {
             await tunnel.connect();
             return tunnel;
         } catch (e) {
-            tunnel.close();
-            if (forgotten) return null;
+            setAside(tunnel);
+            if (forgotten) {
+                dropOverdue();
+                return null;
+            }
             last = e;
             noteAnswered(e);
             if (!mayPass(e)) {
+                dropOverdue();
                 fail(e.message, failureHint(e));
                 return null;
             }
@@ -1211,6 +1280,8 @@ async function main() {
         // "your machine is off" — a connection that was refused by the network
         // rather than never answered has nothing to do with the machine.
         if (!mayPass(e)) {
+            // Final: nothing is left running under it.
+            dropOverdue();
             if (e.answered) answered = true;
             fail(e.message, failureHint(e));
             return;

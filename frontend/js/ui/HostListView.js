@@ -29,7 +29,7 @@
 import { BackendClient } from '../api/BackendClient.js';
 import { shortGpuNames } from '../util/gpuName.js';
 import { Host } from '../models/Host.js';
-import { App } from '../models/App.js';
+import { App, sortApps } from '../models/App.js';
 import { PairDialog } from './PairDialog.js';
 import { BackendDialog } from './BackendDialog.js';
 import { ShareBoard } from './ShareBoard.js';
@@ -63,23 +63,6 @@ import { hostUpdate, canSelfUpdate } from './HostUpdate.js';
  * app started on its own.
  */
 const SUNSHINE_DOWNLOAD_URL = 'https://github.com/LizardByte/Sunshine/releases/latest';
-
-/**
- * The order a host card shows its apps in: "MoonlightWeb Virtual Display"
- * always first, then alphabetical.
- *
- * Not the host's order: that one moves under the user — the native host lists
- * the primary display first, and the display just streamed becomes primary —
- * so the card they clicked would jump to the front. A fixed order keeps every
- * app where the hand expects it.
- */
-function sortApps(apps) {
-    return apps.sort(
-        (a, b) =>
-            (b.isVirtualDisplay ? 1 : 0) - (a.isVirtualDisplay ? 1 : 0) ||
-            a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }),
-    );
-}
 
 export class HostListView {
     // First backoff before re-attempting an app-list fetch that failed
@@ -1085,9 +1068,25 @@ export class HostListView {
 
         // Fill in app grids for available hosts (cache hit = instant).
         for (const host of this.hosts) {
-            if (host.isAvailable && !host.needsVirtualDisplay && !host.needsCapturePermission)
+            if (
+                host.isAvailable &&
+                !host.needsVirtualDisplay &&
+                (!host.leftByRemoteDesktop || this._remoteDesktopHasApp(host)) &&
+                !host.needsCapturePermission
+            )
                 this._ensureAppsLoaded(host);
         }
+    }
+
+    /**
+     * A host whose session Remote Desktop left: whether its card shows its one
+     * app ("This PC's screen", or "This PC's sign-in screen" outside a kiosk)
+     * rather than the text alone.
+     */
+    _remoteDesktopHasApp(host) {
+        return (
+            host.returnsFromRemoteDesktop || (host.opensSignInScreen && !BackendClient.adminLocked)
+        );
     }
 
     renderCard(host) {
@@ -1214,6 +1213,15 @@ export class HostListView {
                 : t('vdisplay.emptyBodyNoDriver');
             return `<div class="host-body-center host-empty-display">
                         <p class="host-empty-display-text">${text}</p>
+                    </div>`;
+        }
+        if (host.leftByRemoteDesktop && !this._remoteDesktopHasApp(host)) {
+            // Windows: closing Remote Desktop left the session with no screen
+            // at all, virtual ones included. Only its return to the PC's
+            // screen brings one back: with the admin's setting on, the grid
+            // below has "This PC's screen", which does that when opened.
+            return `<div class="host-body-center host-empty-display">
+                        <p class="host-empty-display-text">${t('hosts.sessionLeftByRemoteDesktop')}</p>
                     </div>`;
         }
         if (host.needsCapturePermission) {

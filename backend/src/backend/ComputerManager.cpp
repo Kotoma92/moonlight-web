@@ -16,6 +16,7 @@
  */
 
 #include "ComputerManager.h"
+#include "backend/CloseWhenDoneNam.h"
 #include "backend/ManualHostMerge.h"
 
 #include "streambackend/BackendProbe.h"
@@ -28,6 +29,7 @@
 #include "WolfApiClient.h"
 #include "streambackend/NativeHostBackend.h"
 #include "streambackend/NativeProbeService.h"
+#include "streaming/RemoteDesktopReturn.h"
 #include "VirtualDisplay.h"
 #include "mw/native/Capabilities.h"
 #include "mw/native/HidPassthrough.h"
@@ -37,6 +39,10 @@
 #include "common/Logger.h"
 #include "server/AppSettings.h"
 #include "server/HostAppImage.h"
+
+extern "C" {
+#include "Limelight.h" // SCM_H264
+}
 
 #include <qmdnsengine/server.h>
 #include <qmdnsengine/browser.h>
@@ -180,7 +186,9 @@ private:
 
 ComputerManager::ComputerManager(QObject* parent)
     : QObject(parent)
-    , m_Nam(new QNetworkAccessManager(this))
+    // The poll's, the scan's, the probes' and every backend's on these hosts: no
+    // connection of theirs is kept once its request ends (see CloseWhenDoneNam).
+    , m_Nam(new CloseWhenDoneNam(this))
     , m_Http(new NvHTTP(m_Nam, this))
 {
     m_Nam->setProxy(QNetworkProxy::NoProxy);
@@ -287,6 +295,11 @@ void ComputerManager::init()
     // when the answer arrives — and takes it down when the user logs off.
     connect(&NativeProbeService::instance(), &NativeProbeService::changed, this,
             &ComputerManager::refreshNativeHost);
+    // A Windows session left by Remote Desktop has no screen at all, and gets
+    // one back when it returns to the console: the card follows both.
+    connect(&RemoteDesktopReturn::instance(), &RemoteDesktopReturn::changed, this,
+            &ComputerManager::refreshNativeHost);
+    RemoteDesktopReturn::instance().start();
     startPolling();
 
     // Single-shot timer that closes each mDNS discovery window and frees 5353.
@@ -376,7 +389,17 @@ void ComputerManager::refreshNativeHost()
     // What this machine can really encode, in the same terms every other host
     // reports. Without it the codec auto-selection and the transport filter —
     // which read this field for every host — conclude that it supports nothing.
-    host->serverCodecModeSupport = NativeHostBackend::codecModeSupport();
+    //
+    // A session Remote Desktop left sees no display, and its probe then names
+    // no encoder at all. The sign-in screen's stream is captured and encoded
+    // by a worker on the console, by the same GPU: it keeps what this machine
+    // could encode last, H.264 at the very least.
+    const int codecs = NativeHostBackend::codecModeSupport();
+    if (codecs == 0 && RemoteDesktopReturn::instance().leftByRemoteDesktop())
+        host->serverCodecModeSupport =
+            host->serverCodecModeSupport != 0 ? host->serverCodecModeSupport : SCM_H264;
+    else
+        host->serverCodecModeSupport = codecs;
 
     if (noDisplay)
         Logger::info(QString("Native host has no display: %1 — card kept for the virtual display")
@@ -398,12 +421,27 @@ QJsonObject ComputerManager::nativeDisplayJson()
     // Display" is installed here (then it is a card of its own, on or off).
     QJsonObject obj;
     const mw::native::Capabilities caps = NativeProbeService::instance().snapshot();
-    obj["state"] = caps.available ? QStringLiteral("ok")
+    // Nothing attached because Remote Desktop left this session without a
+    // screen is not a cable to plug in, nor a virtual display to open: the
+    // card says what happened (Windows, RemoteDesktopReturn).
+    const bool leftByRemoteDesktop = !caps.available &&
+                                     caps.reason == mw::native::Unavailability::NoDisplay &&
+                                     RemoteDesktopReturn::instance().leftByRemoteDesktop();
+    obj["state"] = caps.available        ? QStringLiteral("ok")
+                   : leftByRemoteDesktop ? QStringLiteral("session_disconnected")
                    : caps.reason == mw::native::Unavailability::NoDisplay
                        ? QStringLiteral("no_display")
                    : caps.reason == mw::native::Unavailability::CapturePermission
                        ? QStringLiteral("no_capture_permission")
                        : QStringLiteral("unavailable");
+    // Left by Remote Desktop, and its card brings it back when opened ("This
+    // PC's screen"): the card shows that one app rather than the text alone.
+    obj["remote_desktop_return"] =
+        leftByRemoteDesktop && RemoteDesktopReturn::instance().offersReturn();
+    // Or "This PC's sign-in screen" in its place: the console's sign-in
+    // screen, streamed, and signed in through. A kiosk's page shows the
+    // card's text only, and the server refuses it the stream.
+    obj["sign_in_screen"] = leftByRemoteDesktop && RemoteDesktopReturn::instance().offersSignIn();
     // macOS alone can withhold it (Accessibility): false means a stream would
     // show a picture and take none of the viewer's input — said on the card
     // and when the stream starts, since macOS itself says nothing.
@@ -1524,7 +1562,8 @@ void ComputerManager::startPairingChain(const QString& uuid)
     // No announcer: on a Sunshine host a person is already reading the PIN off
     // our UI and typing it in.
     PairingChain::run(
-        pm, m_PairingPins.value(uuid), {}, [this, uuid](const PairingChain::Result& result) {
+        pm, m_PairingPins.value(uuid), nullptr, {},
+        [this, uuid](const PairingChain::Result& result) {
             // Re-resolve the session: while in flight nothing frees it, but the host
             // could still be gone if the whole ComputerManager path changed.
             auto it = m_ActivePairings.find(uuid);

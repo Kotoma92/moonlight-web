@@ -9,10 +9,13 @@
 #include "server/RestRouter.h"
 #include "server/routes/PairRequestRoutes.h"
 
+#include <QFile>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QTemporaryDir>
 
@@ -72,6 +75,20 @@ struct Server
              [this](const QString& address) {
                  placed.append(address);
                  return cities.value(address);
+             },
+             []() {
+                 // This host's links: the house's /24, its /64, and the link-local one.
+                 return QList<QPair<QHostAddress, int>>{
+                     {QHostAddress(QStringLiteral("192.168.1.66")), 24},
+                     {QHostAddress(QStringLiteral("198.51.100.66")), 24},
+                     {QHostAddress(QStringLiteral("2001:db8:1:2::66")), 64},
+                     {QHostAddress(QStringLiteral("fe80::66")), 64}};
+             },
+             [](const QString& address) {
+                 // This machine: its own addresses on those links.
+                 return address == QLatin1String("192.168.1.66") ||
+                        address == QLatin1String("2001:db8:1:2::66") ||
+                        address == QLatin1String("fe80::66");
              }});
     }
 
@@ -219,9 +236,9 @@ void testOnlyFromThisLan()
     quiet.address = QStringLiteral("192.168.1.175");
     CHECK(!json(s.send(quiet.ask())).contains("rendezvous_url"));
 
-    // From the internet, on a socket; from a global IPv6 address or a mesh VPN
-    // (100.64/10), which are not this LAN's either.
-    for (const char* elsewhere : {"203.0.113.5", "2001:db8::5", "100.64.1.2"}) {
+    // From the internet, on a socket; from a global IPv6 address, a mesh VPN
+    // (100.64/10), or a private network that is not one of this host's links.
+    for (const char* elsewhere : {"203.0.113.5", "2001:db8::5", "100.64.1.2", "10.0.0.5"}) {
         Device far;
         far.address = QString::fromLatin1(elsewhere);
         CHECK_EQ(error(s.send(far.ask())), QStringLiteral("lan_only"));
@@ -235,6 +252,13 @@ void testOnlyFromThisLan()
     HttpRequest rebound = d.ask();
     rebound.hostTrusted = false;
     CHECK_EQ(error(s.send(rebound)), QStringLiteral("lan_only"));
+    // A LAN address under the public domain, or under no name at all: this host
+    // is reached that way from anywhere.
+    HttpRequest underDomain = d.ask();
+    underDomain.headers.insert(QStringLiteral("host"), QStringLiteral("pc.example.test"));
+    CHECK_EQ(error(s.send(underDomain)), QStringLiteral("lan_only"));
+    underDomain.headers.insert(QStringLiteral("host"), QString());
+    CHECK_EQ(error(s.send(underDomain)), QStringLiteral("lan_only"));
 
     // Loopback under the public domain: a proxy on this machine forwarding the
     // internet. The address it names, or none at all, changes nothing.
@@ -251,11 +275,38 @@ void testOnlyFromThisLan()
     forwarded.headers.insert(QStringLiteral("x-forwarded-for"), QStringLiteral("198.51.100.9"));
     CHECK_EQ(error(s.send(forwarded)), QStringLiteral("lan_only"));
 
-    // This machine itself, under its own name.
+    // This machine itself is not the house, under its own name or by its own
+    // address on this LAN: its administrator lets a device in as such.
     HttpRequest local = d.ask();
     local.clientAddress = QStringLiteral("127.0.0.1");
     local.headers.insert(QStringLiteral("host"), QStringLiteral("localhost:8443"));
-    CHECK_EQ(s.send(local).statusCode, 200);
+    CHECK_EQ(error(s.send(local)), QStringLiteral("lan_only"));
+    Device own;
+    own.address = QStringLiteral("192.168.1.66");
+    CHECK_EQ(error(s.send(own.ask())), QStringLiteral("lan_only"));
+    HttpRequest unnamed = Device().ask();
+    unnamed.clientAddress = QStringLiteral("127.0.0.1");
+    unnamed.headers.insert(QStringLiteral("host"), QString());
+    CHECK_EQ(error(s.send(unnamed)), QStringLiteral("lan_only"));
+
+    // A LAN peer passing a request along, whatever its header says: its sender
+    // may stand anywhere.
+    for (const char* header :
+         {"x-forwarded-for", "forwarded", "cf-connecting-ip", "via", "x-real-ip"}) {
+        HttpRequest relayed = Device().ask();
+        relayed.headers.insert(QString::fromLatin1(header), QStringLiteral("192.168.1.80"));
+        CHECK_EQ(error(s.send(relayed)), QStringLiteral("lan_only"));
+    }
+
+    // A proxy on this machine, under a local name: its sender may stand
+    // anywhere too, whatever address the proxy names, or none.
+    for (const char* header : {"via", "x-real-ip", "x-forwarded-host", "x-forwarded-for"}) {
+        HttpRequest viaProxy = Device().ask();
+        viaProxy.clientAddress = QStringLiteral("127.0.0.1");
+        viaProxy.headers.insert(QStringLiteral("host"), QStringLiteral("localhost:8443"));
+        viaProxy.headers.insert(QString::fromLatin1(header), QStringLiteral("192.168.1.80"));
+        CHECK_EQ(error(s.send(viaProxy)), QStringLiteral("lan_only"));
+    }
 
     // On a line: the address ICE settled on, and the request for the line's key.
     HttpRequest line = d.ask();
@@ -299,7 +350,7 @@ void testFromElsewhereWhenTheAdministratorAllowsIt()
     CHECK(s.settings.pairRequestInternet());
 
     // Ticked: every caller from elsewhere asks, and gets the page to open.
-    for (const char* elsewhere : {"203.0.113.5", "2001:db8::5", "100.64.1.2"}) {
+    for (const char* elsewhere : {"203.0.113.5", "2001:db8::5", "100.64.1.2", "10.0.0.5"}) {
         Device far;
         far.address = QString::fromLatin1(elsewhere);
         const HttpResponse asked = s.send(far.ask());
@@ -584,7 +635,7 @@ void testEachLineCallerCountsOnItsOwn()
 
 void testOnlyTheAdministratorAnswers()
 {
-    SECTION("pair-request routes: the administrator alone sees and answers a request");
+    SECTION("pair-request routes: no key of its own, no administrator's right: no answer");
     Server s;
     Device d;
     const QString code = askAndReveal(s, d);
@@ -593,7 +644,8 @@ void testOnlyTheAdministratorAnswers()
     // No session at all: 401, counted.
     CHECK_EQ(s.send(fromTv("GET", path)).statusCode, 401);
     CHECK_EQ(s.guarded.size(), 1);
-    // A session, remembered or not, without the administrator's right: 403.
+    // A session, remembered or not, without the administrator's right nor a key
+    // of its own to sign with: 403, even on this LAN.
     const QString member = s.auth->createSession(kPhone, "Laptop");
     const QString guest = s.auth->createSession(kPhone, "Kiosk", false, /*ephemeral=*/true);
     for (const QString& token : {member, guest}) {
@@ -619,6 +671,388 @@ void testOnlyTheAdministratorAnswers()
     CHECK(!json(seen).contains("code"));
     CHECK_EQ(error(s.send(fromAdmin("GET", "/api/auth/pair-request/short"))),
              QStringLiteral("unknown_request"));
+}
+
+void testAPairedSessionOnThisLanAnswersToo()
+{
+    SECTION("pair-request routes: from this LAN, a paired session with its key answers too");
+    Server s;
+    Device d;
+    const QString code = askAndReveal(s, d);
+    const QString path = "/api/auth/pair-request/" + d.id;
+
+    // A phone of the house, paired by its PIN, its key bound: not the administrator.
+    const QByteArray pem = PairingCrypto::generatePrivateKeyPem();
+    const QString member = s.auth->createSession(kPhone, "Kitchen phone");
+    CHECK(s.auth->bindSessionKey(member, PairingCrypto::publicKeySpkiFromPrivatePem(pem)));
+    const auto asMember = [&](HttpRequest req) {
+        req.isLocal = false;
+        req.headers.insert(QStringLiteral("cookie"), "mw_session=" + member);
+        return req;
+    };
+    const auto signedAnswer = [&](const QString& typed) {
+        HttpRequest req = asMember(approval(d, typed));
+        const QByteArray sig =
+            PairingCrypto::sign(pem, PhonePairing::approveMessage(s.hostId(), d.id, typed));
+        QJsonObject body = QJsonDocument::fromJson(req.body).object();
+        body.insert(QStringLiteral("sig"), b64(sig));
+        req.body = QJsonDocument(body).toJson(QJsonDocument::Compact);
+        return req;
+    };
+
+    // Where it stands decides, as ICE or the socket says it, never a header.
+    HttpRequest line = asMember(fromTv("GET", path));
+    line.viaTunnel = true;
+    line.hostTrusted = false;
+    line.clientAddress = QStringLiteral("203.0.113.7");
+    CHECK_EQ(error(s.send(line)), QStringLiteral("not_allowed"));
+    line.clientAddress = QStringLiteral("peer-4f2a");
+    CHECK_EQ(error(s.send(line)), QStringLiteral("not_allowed"));
+    HttpRequest global = asMember(fromTv("GET", path));
+    global.clientAddress = QStringLiteral("2001:db8::20");
+    CHECK_EQ(error(s.send(global)), QStringLiteral("not_allowed"));
+    HttpRequest untrusted = asMember(fromTv("GET", path));
+    untrusted.hostTrusted = false;
+    CHECK_EQ(error(s.send(untrusted)), QStringLiteral("not_allowed"));
+    CHECK_EQ(s.guarded.size(), 0);
+
+    // A public IPv4 address, even inside the prefix of one of this host's
+    // interfaces, is not the house.
+    line.clientAddress = QStringLiteral("198.51.100.50");
+    CHECK_EQ(error(s.send(line)), QStringLiteral("not_allowed"));
+    // Off this host's links, private or not: no.
+    line.clientAddress = QStringLiteral("10.0.0.5");
+    CHECK_EQ(error(s.send(line)), QStringLiteral("not_allowed"));
+    line.clientAddress = QStringLiteral("2001:db8:1:3::50");
+    CHECK_EQ(error(s.send(line)), QStringLiteral("not_allowed"));
+    HttpRequest otherLan = asMember(fromTv("GET", path));
+    otherLan.clientAddress = QStringLiteral("10.0.0.5");
+    CHECK_EQ(error(s.send(otherLan)), QStringLiteral("not_allowed"));
+    // A public IPv6 address in this host's /64: on a line, where ICE found it,
+    // yes; on a socket, no.
+    line.clientAddress = QStringLiteral("2001:db8:1:2::50");
+    CHECK_EQ(s.send(line).statusCode, 200);
+    HttpRequest sameV6 = asMember(fromTv("GET", path));
+    sameV6.clientAddress = QStringLiteral("2001:db8:1:2::50");
+    CHECK_EQ(error(s.send(sameV6)), QStringLiteral("not_allowed"));
+
+    // On a line that ICE put on this LAN, as the phone that scanned the QR code is.
+    line.clientAddress = kPhone;
+    const HttpResponse seen = s.send(line);
+    CHECK_EQ(seen.statusCode, 200);
+    CHECK(!json(seen).contains("code"));
+
+    // Its answer is signed by its key, with the code typed from the device.
+    CHECK_EQ(error(s.send(asMember(approval(d, code)))), QStringLiteral("bad_signature"));
+    CHECK_EQ(error(s.send(signedAnswer(otherThan(code)))), QStringLiteral("code_mismatch"));
+    CHECK_EQ(s.send(signedAnswer(code)).statusCode, 200);
+    const HttpResponse paired = s.send(d.claim(s.hostId()));
+    CHECK_EQ(json(paired).value("state").toString(), QStringLiteral("paired"));
+    // The device goes with the session that let it in, as with the administrator.
+    CHECK_EQ(s.auth->sessionForToken(cookieOf(paired)).approvedBy,
+             s.auth->sessionIdForToken(member));
+
+    // It may say no as well, signed as a yes is.
+    Device other;
+    askAndReveal(s, other);
+    HttpRequest no = asMember(fromTv("POST", "/api/auth/pair-request/" + other.id + "/refuse"));
+    CHECK_EQ(error(s.send(no)), QStringLiteral("bad_signature"));
+    const QByteArray otherKeySig = PairingCrypto::sign(
+        PairingCrypto::generatePrivateKeyPem(), PhonePairing::refuseMessage(s.hostId(), other.id));
+    no.body = QJsonDocument(QJsonObject{{"sig", b64(otherKeySig)}}).toJson(QJsonDocument::Compact);
+    CHECK_EQ(error(s.send(no)), QStringLiteral("bad_signature"));
+    const QByteArray noSig =
+        PairingCrypto::sign(pem, PhonePairing::refuseMessage(s.hostId(), other.id));
+    no.body = QJsonDocument(QJsonObject{{"sig", b64(noSig)}}).toJson(QJsonDocument::Compact);
+    CHECK_EQ(s.send(no).statusCode, 200);
+
+    // A session with no key of its own, even on a line ICE put on this LAN: no.
+    const QString keyless = s.auth->createSession(kPhone, "Old laptop");
+    HttpRequest bare = fromTv("GET", path);
+    bare.viaTunnel = true;
+    bare.hostTrusted = false;
+    bare.clientAddress = kPhone;
+    bare.headers.insert(QStringLiteral("cookie"), "mw_session=" + keyless);
+    CHECK_EQ(error(s.send(bare)), QStringLiteral("not_allowed"));
+}
+
+/// A member of the house, its key bound, for the sections below.
+struct Member
+{
+    QByteArray pem = PairingCrypto::generatePrivateKeyPem();
+    QString token;
+
+    Member(Server& s, const QString& name, bool ephemeral = false)
+    {
+        token = s.auth->createSession(kPhone, name, false, ephemeral);
+        CHECK(s.auth->bindSessionKey(token, PairingCrypto::publicKeySpkiFromPrivatePem(pem)));
+    }
+
+    HttpRequest get(const QString& id) const
+    {
+        HttpRequest req = fromTv("GET", "/api/auth/pair-request/" + id);
+        req.headers.insert(QStringLiteral("cookie"), "mw_session=" + token);
+        return req;
+    }
+
+    HttpRequest yes(Server& s, const Device& d, const QString& code) const
+    {
+        HttpRequest req = approval(d, code);
+        req.isLocal = false;
+        req.headers.insert(QStringLiteral("cookie"), "mw_session=" + token);
+        const QByteArray sig =
+            PairingCrypto::sign(pem, PhonePairing::approveMessage(s.hostId(), d.id, code));
+        req.body = QJsonDocument(QJsonObject{{"code", code}, {"sig", b64(sig)}})
+                       .toJson(QJsonDocument::Compact);
+        return req;
+    }
+};
+
+void testTheHouseAnswersTheHouseOnly()
+{
+    SECTION("pair-request routes: a request from elsewhere stays the administrator's alone");
+    Server s;
+    CHECK(s.setInternetRequests(true));
+    Device far;
+    far.address = QStringLiteral("203.0.113.5");
+    const QString code = askAndReveal(s, far);
+    const Member m(s, "Kitchen phone");
+
+    // To a member of the house, it is a request it may not see: neither its
+    // name, nor its address, nor where that is.
+    const HttpResponse seen = s.send(m.get(far.id));
+    CHECK_EQ(error(seen), QStringLiteral("not_allowed"));
+    CHECK(!json(seen).contains("address"));
+    CHECK_EQ(error(s.send(m.yes(s, far, code))), QStringLiteral("not_allowed"));
+    HttpRequest no = m.get(far.id);
+    no.method = QStringLiteral("POST");
+    no.path += QStringLiteral("/refuse");
+    CHECK_EQ(error(s.send(no)), QStringLiteral("not_allowed"));
+
+    // The administrator sees where it comes from, and answers.
+    const HttpResponse admin = s.send(fromAdmin("GET", "/api/auth/pair-request/" + far.id));
+    CHECK_EQ(json(admin).value("origin").toString(), QStringLiteral("internet"));
+    CHECK_EQ(json(admin).value("address").toString(), QStringLiteral("203.0.113.5"));
+    CHECK_EQ(s.send(approval(far, code)).statusCode, 200);
+}
+
+void testARequestOffTheHostsLinksStaysTheAdministrators()
+{
+    SECTION(
+        "pair-request routes: a device asking from off this host's links is the administrator's");
+    Server s;
+    // A private address, but another network than this host's: a VPN, a
+    // neighbour's subnet. It is the internet: it asks only while the box is
+    // ticked, on a socket as on a line.
+    Device off;
+    off.address = QStringLiteral("10.0.0.5");
+    CHECK_EQ(error(s.send(off.ask())), QStringLiteral("lan_only"));
+    HttpRequest line = off.ask();
+    line.viaTunnel = true;
+    line.hostTrusted = false;
+    line.tunnelKey = off.spki;
+    CHECK_EQ(error(s.send(line)), QStringLiteral("lan_only"));
+    CHECK(s.setInternetRequests(true));
+    const QString code = askAndReveal(s, off);
+    // The house does not see it.
+    const Member m(s, "Kitchen phone");
+    CHECK_EQ(error(s.send(m.get(off.id))), QStringLiteral("not_allowed"));
+    CHECK_EQ(error(s.send(m.yes(s, off, code))), QStringLiteral("not_allowed"));
+    // The administrator sees it, from the internet, and answers.
+    const HttpResponse admin = s.send(fromAdmin("GET", "/api/auth/pair-request/" + off.id));
+    CHECK_EQ(json(admin).value("origin").toString(), QStringLiteral("internet"));
+    CHECK_EQ(s.send(approval(off, code)).statusCode, 200);
+}
+
+void testOffALineTheHouseAnswersUnderALocalName()
+{
+    SECTION("pair-request routes: off a line, the house answers under a local name only");
+    Server s;
+    Device d;
+    const QString code = askAndReveal(s, d);
+    const Member m(s, "Kitchen phone");
+
+    // On a socket from this LAN, under the public domain or under no name at
+    // all: where this host is reached from anywhere, not the house.
+    HttpRequest seen = m.get(d.id);
+    seen.headers.insert(QStringLiteral("host"), QStringLiteral("pc.example.test"));
+    CHECK_EQ(error(s.send(seen)), QStringLiteral("not_allowed"));
+    seen.headers.insert(QStringLiteral("host"), QString());
+    CHECK_EQ(error(s.send(seen)), QStringLiteral("not_allowed"));
+    HttpRequest underDomain = m.yes(s, d, code);
+    underDomain.headers.insert(QStringLiteral("host"), QStringLiteral("pc.example.test"));
+    CHECK_EQ(error(s.send(underDomain)), QStringLiteral("not_allowed"));
+
+    // Under an mDNS name, or this host's private address: the house.
+    seen.headers.insert(QStringLiteral("host"), QStringLiteral("dualrtx.local:8443"));
+    CHECK_EQ(s.send(seen).statusCode, 200);
+
+    // Passed along by another machine on this LAN: not the house, whatever
+    // the proxy's header says.
+    for (const char* header :
+         {"x-forwarded-for", "forwarded", "cf-connecting-ip", "via", "x-real-ip"}) {
+        HttpRequest relayed = m.yes(s, d, code);
+        relayed.headers.insert(QString::fromLatin1(header), QStringLiteral("1.1 relay"));
+        CHECK_EQ(error(s.send(relayed)), QStringLiteral("not_allowed"));
+    }
+
+    // From this machine itself, by its own address on this LAN or the
+    // loopback, on a socket or on a line: never the house.
+    for (const char* own : {"192.168.1.66", "127.0.0.1"}) {
+        HttpRequest mine = m.yes(s, d, code);
+        mine.clientAddress = QString::fromLatin1(own);
+        mine.headers.insert(QStringLiteral("host"), QStringLiteral("dualrtx.local:8443"));
+        CHECK_EQ(error(s.send(mine)), QStringLiteral("not_allowed"));
+        mine.viaTunnel = true;
+        CHECK_EQ(error(s.send(mine)), QStringLiteral("not_allowed"));
+    }
+
+    // On a line, the public domain changes nothing: ICE says where it stands.
+    HttpRequest line = m.yes(s, d, code);
+    line.viaTunnel = true;
+    line.hostTrusted = false;
+    line.headers.insert(QStringLiteral("host"), QStringLiteral("pc.example.test"));
+    CHECK_EQ(s.send(line).statusCode, 200);
+    const HttpResponse paired = s.send(d.claim(s.hostId()));
+    CHECK_EQ(json(paired).value("state").toString(), QStringLiteral("paired"));
+}
+
+void testATemporarySessionLetsNoDeviceIn()
+{
+    SECTION("pair-request routes: a session kept without \"remember me\" lets no device in");
+    Server s;
+    Device d;
+    const QString code = askAndReveal(s, d);
+
+    // A member of the house, signed in for this visit only: it sees, it may
+    // say no, but not yes.
+    const Member visit(s, "Visitor's phone", /*ephemeral=*/true);
+    CHECK_EQ(s.send(visit.get(d.id)).statusCode, 200);
+    CHECK_EQ(error(s.send(visit.yes(s, d, code))), QStringLiteral("temporary_session"));
+
+    // The administrator's own temporary session neither.
+    HttpRequest admin = approval(d, code, visit.token);
+    CHECK_EQ(error(s.send(admin)), QStringLiteral("temporary_session"));
+
+    // The machine itself, with no session at all, still does.
+    CHECK_EQ(s.send(approval(d, code)).statusCode, 200);
+    CHECK_EQ(json(s.send(d.claim(s.hostId()))).value("state").toString(), QStringLiteral("paired"));
+}
+
+void testAChainOfApproversGoesAsOne()
+{
+    SECTION("pair-request routes: a device let in by a device goes with the first one");
+    Server s;
+    const Member m(s, "Kitchen phone");
+
+    // The phone lets the first TV in; that TV, a paired session of the house
+    // with its own key, lets the second one in.
+    Device first;
+    const QString firstCode = askAndReveal(s, first);
+    CHECK_EQ(s.send(m.yes(s, first, firstCode)).statusCode, 200);
+    const QString firstTv = cookieOf(s.send(first.claim(s.hostId())));
+    CHECK(s.auth->validateSession(firstTv));
+
+    Device second;
+    second.address = QStringLiteral("192.168.1.177");
+    const QString secondCode = askAndReveal(s, second);
+    HttpRequest yes = approval(second, secondCode);
+    yes.isLocal = false;
+    yes.clientAddress = kTv;
+    yes.headers.insert(QStringLiteral("cookie"), "mw_session=" + firstTv);
+    const QByteArray sig = PairingCrypto::sign(
+        first.pem, PhonePairing::approveMessage(s.hostId(), second.id, secondCode));
+    yes.body = QJsonDocument(QJsonObject{{"code", secondCode}, {"sig", b64(sig)}})
+                   .toJson(QJsonDocument::Compact);
+    CHECK_EQ(s.send(yes).statusCode, 200);
+    const QString secondTv = cookieOf(s.send(second.claim(s.hostId())));
+    CHECK(s.auth->validateSession(secondTv));
+    CHECK_EQ(s.auth->sessionForToken(secondTv).approvedBy, s.auth->sessionIdForToken(firstTv));
+
+    // The phone revoked: both TVs go with it.
+    s.auth->destroySession(s.auth->sessionIdForToken(m.token));
+    CHECK(!s.auth->validateSession(firstTv));
+    CHECK(!s.auth->validateSession(secondTv));
+}
+
+void testADeviceOutlivesAnApproverThatLoggedOut()
+{
+    SECTION("pair-request routes: the approver logs out, the device stays");
+    Server s;
+    const Member m(s, "Kitchen phone");
+    Device d;
+    const QString code = askAndReveal(s, d);
+    CHECK_EQ(s.send(m.yes(s, d, code)).statusCode, 200);
+    const QString tv = cookieOf(s.send(d.claim(s.hostId())));
+    CHECK(s.auth->validateSession(tv));
+
+    // The phone leaves by itself: the TV stays, now the administrator's.
+    CHECK(s.auth->logoutSession(m.token));
+    CHECK(!s.auth->validateSession(m.token));
+    CHECK(s.auth->validateSession(tv));
+    CHECK(s.auth->sessionForToken(tv).approvedBy.isEmpty());
+
+    // A revocation from the list of sessions still takes what a session let in.
+    const Member other(s, "Hall phone");
+    Device next;
+    const QString nextCode = askAndReveal(s, next);
+    CHECK_EQ(s.send(other.yes(s, next, nextCode)).statusCode, 200);
+    const QString nextTv = cookieOf(s.send(next.claim(s.hostId())));
+    CHECK(s.auth->validateSession(nextTv));
+    s.auth->destroySession(s.auth->sessionIdForToken(other.token));
+    CHECK(!s.auth->validateSession(nextTv));
+    CHECK(s.auth->validateSession(tv));
+}
+
+void testADeviceOutlivesAnApproverThatRanOut()
+{
+    SECTION("pair-request routes: the approver's time runs out, the device stays");
+    Server s;
+    const Member m(s, "Kitchen phone");
+    Device d;
+    const QString code = askAndReveal(s, d);
+    CHECK_EQ(s.send(m.yes(s, d, code)).statusCode, 200);
+    const QString tv = cookieOf(s.send(d.claim(s.hostId())));
+    CHECK(s.auth->validateSession(tv));
+
+    // The phone's session last seen long ago, as the server finds it after a
+    // restart: dropped at load, and the TV kept, now the administrator's.
+    s.auth->saveSessions();
+    const QString path =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/sessions.json";
+    QFile file(path);
+    CHECK(file.open(QIODevice::ReadOnly));
+    QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+    QJsonArray sessions = root.value("sessions").toArray();
+    file.close();
+    const QString phoneId = s.auth->sessionIdForToken(m.token);
+    for (qsizetype i = 0; i < sessions.size(); ++i) {
+        QJsonObject o = sessions.at(i).toObject();
+        if (o.value("token").toString() != phoneId) continue;
+        o["created_at"] = 1'000'000'000;
+        o["last_seen"] = 1'000'000'000;
+        sessions[i] = o;
+    }
+    CHECK(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    root["sessions"] = sessions;
+    file.write(QJsonDocument(root).toJson());
+    file.close();
+    s.auth->loadSessions();
+    CHECK(!s.auth->validateSession(m.token));
+    CHECK(s.auth->validateSession(tv));
+    CHECK(s.auth->sessionForToken(tv).approvedBy.isEmpty());
+}
+
+void testAPlayerCookieIsNoSession()
+{
+    SECTION("pair-request routes: a guest's player cookie answers nothing");
+    Server s;
+    Device d;
+    askAndReveal(s, d);
+    HttpRequest get = fromTv("GET", "/api/auth/pair-request/" + d.id);
+    get.headers.insert(QStringLiteral("cookie"), QStringLiteral("mw_player=guest-cookie"));
+    CHECK_EQ(s.send(get).statusCode, 401);
+    CHECK_EQ(s.guarded.size(), 1);
 }
 
 void testTheCodeIsTypedAndSigned()
@@ -765,7 +1199,7 @@ void testWhatEachFailureCosts()
     // A claim the device's key did not sign: counted against who sent it.
     Device stranger = d;
     stranger.pem = PairingCrypto::generatePrivateKeyPem();
-    stranger.address = QStringLiteral("192.168.1.66");
+    stranger.address = QStringLiteral("192.168.1.65");
     CHECK_EQ(error(s.send(stranger.claim(s.hostId()))), QStringLiteral("bad_proof"));
     CHECK_EQ(s.auth->failedAttemptCount(stranger.address), 1);
     CHECK_EQ(s.guarded, QStringList{stranger.address});
@@ -842,6 +1276,15 @@ void run_pair_request_routes_tests()
     testTheCityOnlyWhileLocatingIsAllowed();
     testEachLineCallerCountsOnItsOwn();
     testOnlyTheAdministratorAnswers();
+    testAPairedSessionOnThisLanAnswersToo();
+    testTheHouseAnswersTheHouseOnly();
+    testARequestOffTheHostsLinksStaysTheAdministrators();
+    testOffALineTheHouseAnswersUnderALocalName();
+    testATemporarySessionLetsNoDeviceIn();
+    testAChainOfApproversGoesAsOne();
+    testADeviceOutlivesAnApproverThatLoggedOut();
+    testADeviceOutlivesAnApproverThatRanOut();
+    testAPlayerCookieIsNoSession();
     testTheCodeIsTypedAndSigned();
     testThisMachineNeedsNoSignature();
     testALostAnswerIsAskedAgain();

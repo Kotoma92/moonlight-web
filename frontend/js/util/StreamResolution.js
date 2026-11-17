@@ -271,6 +271,21 @@ export function devicePixelSize(win) {
     return { width: Math.max(a, b), height: Math.min(a, b) };
 }
 
+/**
+ * This browser window's inner viewport in physical pixels, even in both dimensions.
+ * @param {{innerWidth?: number, innerHeight?: number, devicePixelRatio?: number}} [win]
+ * @returns {{width:number, height:number}|null} null when the window is unknown
+ */
+export function windowPixelSize(win) {
+    const w = win || (typeof window !== 'undefined' ? window : null);
+    if (!w || !(w.innerWidth > 0) || !(w.innerHeight > 0)) return null;
+    const dpr = w.devicePixelRatio > 0 ? w.devicePixelRatio : 1;
+    const width = Math.round(w.innerWidth * dpr) & ~1;
+    const height = Math.round(w.innerHeight * dpr) & ~1;
+    if (!(width > 0) || !(height > 0)) return null;
+    return { width, height };
+}
+
 /** How far apart two stream widths of the same height may be and still count
  *  as the same size: a screen read a few pixels off is no new screen. */
 export const SCREEN_SIZE_TOLERANCE = 0.01;
@@ -390,15 +405,37 @@ export function resolveStreamSize(choice, ctx) {
     const nativeHost = !!(ctx && ctx.nativeHost);
     const touch = !!(ctx && ctx.touch);
     const tv = !!(ctx && ctx.tv);
-    const dev = ctx && ctx.device !== undefined ? ctx.device : devicePixelSize();
+    const aspectChoice = (ctx && ctx.aspect) || (c && c.aspect) || null;
+    const isWindowAspect = aspectChoice === 'window';
+    const ratio =
+        aspectChoice && aspectChoice !== 'auto' && aspectChoice !== 'window'
+            ? aspectRatio(aspectChoice)
+            : 0;
+    const dev =
+        ctx && ctx.device !== undefined
+            ? ctx.device
+            : isWindowAspect
+              ? windowPixelSize() || devicePixelSize()
+              : devicePixelSize();
     // A phone or a tablet keeps its 1440 lines at any budget.
     const maxHeight = ctx && !touch ? ctx.autoMaxHeight : undefined;
     if (nativeHost && ctx && ctx.virtualDisplay) {
         const made = virtualDisplaySize(c, dev, tv, maxHeight);
-        if (made)
+        if (made) {
+            let h = made.height;
+            let w = made.width;
+            let aspect = made.width + ':' + made.height;
+            if (ratio > 0) {
+                w = Math.round(h * ratio) & ~1;
+                const fitted = fitModeBounds(w, h);
+                h = fitted.height;
+                aspect = aspectChoice;
+            } else if (isWindowAspect && dev) {
+                aspect = `${dev.width}:${dev.height}`;
+            }
             return {
-                height: made.height,
-                aspect: made.width + ':' + made.height,
+                height: h,
+                aspect,
                 fitBox: true,
                 // The display IS that size, so there is nothing to scale; the
                 // flag only says the frame may reach the size asked for.
@@ -408,6 +445,7 @@ export function resolveStreamSize(choice, ctx) {
                 followsScreen: true,
                 fallback: null,
             };
+        }
     }
     const plain = {
         fitBox: false,
@@ -416,49 +454,86 @@ export function resolveStreamSize(choice, ctx) {
         followsScreen: false,
         fallback: null,
     };
-    const fixed = (height) => ({
+    const fixed = (height, aspect = null) => ({
         height: height > 0 ? height : HOST_FALLBACK_HEIGHT,
-        aspect: null,
+        aspect,
         ...plain,
     });
     switch (c.mode) {
         case 'auto': {
-            if (!nativeHost) return fixed(tv ? TV_AUTO_MAX_HEIGHT : HOST_FALLBACK_HEIGHT);
+            if (!nativeHost) {
+                const h = tv ? TV_AUTO_MAX_HEIGHT : HOST_FALLBACK_HEIGHT;
+                if (ratio > 0) return { height: h, aspect: aspectChoice, ...plain };
+                if (isWindowAspect && dev)
+                    return {
+                        height: h,
+                        aspect: `${dev.width}:${dev.height}`,
+                        followsScreen: true,
+                        ...plain,
+                    };
+                return fixed(h);
+            }
             // The host's own size, brought down to fit the box — its shape
             // kept, never upscaled (frameForDisplay's box rule). No screen to
             // read: the host's own size, whatever it is — on a TV, still no
             // more than its ceiling.
             const box = autoBox(dev, touch, tv, maxHeight);
-            if (!box) return tv ? fixed(TV_AUTO_MAX_HEIGHT) : { height: 0, aspect: null, ...plain };
+            if (!box)
+                return tv
+                    ? fixed(TV_AUTO_MAX_HEIGHT, ratio > 0 ? aspectChoice : null)
+                    : { height: 0, aspect: ratio > 0 ? aspectChoice : null, ...plain };
+            let h = box.height;
+            let aspect = box.width + ':' + box.height;
+            if (ratio > 0) {
+                let w = Math.round(h * ratio) & ~1;
+                if (w > box.width) {
+                    w = box.width;
+                    h = Math.round(w / ratio) & ~1;
+                }
+                aspect = aspectChoice;
+            } else if (isWindowAspect && dev) {
+                aspect = `${dev.width}:${dev.height}`;
+            }
             return {
-                height: box.height,
-                aspect: box.width + ':' + box.height,
+                height: h,
+                aspect,
                 fitBox: true,
                 allowUpscale: false,
                 matchDisplay: false,
                 // A phone's box is the same whichever way it is held.
-                followsScreen: !touch,
+                followsScreen: isWindowAspect || !touch,
                 fallback: null,
             };
         }
-        case 'device':
-            if (!dev) return fixed(c.height);
+        case 'device': {
+            if (!dev) return fixed(c.height, ratio > 0 ? aspectChoice : null);
+            let h = dev.height;
+            let aspect = dev.width + ':' + dev.height;
+            if (ratio > 0) {
+                let w = Math.round(h * ratio) & ~1;
+                if (w > dev.width) {
+                    w = dev.width;
+                    h = Math.round(w / ratio) & ~1;
+                }
+                aspect = aspectChoice;
+            }
             return {
-                height: dev.height,
-                aspect: dev.width + ':' + dev.height,
+                height: h,
+                aspect,
                 fitBox: true,
                 allowUpscale: true,
                 matchDisplay: true,
                 followsScreen: true,
                 fallback: autoBox(dev, touch, tv, maxHeight),
             };
+        }
         case 'custom': {
             // Even sizes: what every encoder takes (4:2:0 chroma is half-size).
             const w = clampCustomSize(c.customWidth, 1920) & ~1;
             const h = clampCustomSize(c.customHeight, 1080) & ~1;
             return {
                 height: h,
-                aspect: w + ':' + h,
+                aspect: ratio > 0 ? aspectChoice : w + ':' + h,
                 fitBox: true,
                 allowUpscale: false,
                 matchDisplay: false,
@@ -466,8 +541,24 @@ export function resolveStreamSize(choice, ctx) {
                 fallback: null,
             };
         }
-        default:
-            return fixed(c.height);
+        default: {
+            const h = c.height > 0 ? c.height : HOST_FALLBACK_HEIGHT;
+            const aspect =
+                ratio > 0
+                    ? aspectChoice
+                    : isWindowAspect && dev
+                      ? `${dev.width}:${dev.height}`
+                      : null;
+            return {
+                height: h,
+                aspect,
+                fitBox: false,
+                allowUpscale: false,
+                matchDisplay: false,
+                followsScreen: isWindowAspect,
+                fallback: null,
+            };
+        }
     }
 }
 

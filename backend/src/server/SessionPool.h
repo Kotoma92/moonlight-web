@@ -119,6 +119,13 @@ public:
     // or that app keeps running with nobody attached.
     bool anyOtherLiveOnHost(int index, const QString& hostUuid) const;
 
+    // The slots among the first @p firstSlots that stream @p hostUuid: what
+    // ending that host's session takes down, and nothing streaming another
+    // host. Both legs of a dual stream are on the same host, so they go
+    // together. A live slot with no host recorded yet is still setting up and
+    // counts as this host's, as in anyOtherLiveOnHost.
+    QVector<int> slotsOnHost(const QString& hostUuid, int firstSlots) const;
+
     // Lowest free index at or above reservedSlots, reusing released ones.
     // Returns -1 when every slot up to maxSlots is taken.
     int acquire();
@@ -157,6 +164,16 @@ public:
     // (@p clientUniqueId) is another. Either side empty counts as the same.
     bool hostHeldByAnother(const QString& hostUuid, const QString& sessionToken,
                            const QString& clientUniqueId, int ownerSlots) const;
+
+    // Whether a Stop from one device ends the live slot @p index, one past
+    // the owner slots: the stream of another app, or of a second device on a
+    // multi-user host. It must be on @p hostUuid, be the slot the page named
+    // (@p namedSlot; any when negative), and never another session's. Then it
+    // is this device's when the uniqueid matches, or when the page named this
+    // very slot from the session that started it: the page derives its quit
+    // id from the slot, so that id alone can miss the one the launch carried.
+    bool quitReachesAppSlot(int index, const QString& hostUuid, const QString& clientUniqueId,
+                            const QString& sessionToken, int namedSlot) const;
 
     // The live slots that stream for one session, the one @p isThatSession
     // recognises from a slot's token. A slot with no token (localhost, an

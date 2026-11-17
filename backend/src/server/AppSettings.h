@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -314,7 +315,7 @@ public:
     // Aspect ratio used to derive width from a fixed height. Stored as JSON
     // string "stream_aspect", default "auto" (the browser measures the host's
     // real format at stream start and relaunches with it). Manual overrides:
-    // "16:9", "16:10", "21:9", "4:3", "3:2", "32:9", "5:4".
+    // "window", "16:9", "16:10", "21:9", "4:3", "3:2", "32:9", "5:4".
 
     QString streamAspect() const;
     void setStreamAspect(const QString& aspect);
@@ -437,6 +438,19 @@ public:
 
     bool streamNotifications() const;
     void setStreamNotifications(bool enabled);
+
+    // ── A session left by Remote Desktop (Windows) ──────────────────────────
+    //
+    // Stored as JSON bool "remote_desktop_return", default true, set from the
+    // admin page (Windows, the launcher service installed). Closing a Remote
+    // Desktop window leaves the user's session with no screen at all, and the
+    // native host with nothing to stream: on, its card offers "This PC's
+    // screen", and opening it has the launcher put the session back on this
+    // PC's screen, locked at once (RemoteDesktopReturn). Off, Windows' own
+    // behaviour stays: the session waits, screenless, until the user signs in
+    // on the PC. Read each time the card is listed or opened.
+    bool remoteDesktopReturn() const;
+    void setRemoteDesktopReturn(bool enabled);
 
     // ── Diagnostic modes (admin page → Advanced) ────────────────────────────
     //
@@ -691,6 +705,10 @@ public:
     /// Default: true (recommended — enables direct P2P connections from outside LAN).
     bool upnpEnabled() const;
     void setUpnpEnabled(bool enabled);
+
+    /// Base UDP port for WebRTC media streams (default: 48550).
+    /// Each stream slot binds mediaBasePort + slot.
+    uint16_t mediaBasePort() const;
 
     // ── Router ports (sticky UPnP allocation) ──────────────────────────────────
     //
@@ -1048,21 +1066,22 @@ public:
     /// predates versioning (DNS-mechanism wording), 2+ otherwise.
     int internetConsentVersion() const;
 
-    // ── Host key (host-machine recognition over the public domain) ──────────
+    // ── Host key ────────────────────────────────────────────────────────────
     //
-    // Long random token embedded in the host machine's own entry-point URLs
-    // (Desktop shortcut, tray, startup open) as ?mwk=..., so a browser opened
-    // on the host via the public domain can prove it runs on the host and be
-    // granted a localhost-equivalent session. Single-use: each successful
-    // redemption rotates the key (and the entry points are rewritten), so a
-    // leaked URL cannot be replayed.
+    // The key a link of this machine carries is made per link and kept in
+    // memory (server/HostKeyVault.h). An earlier version kept one here, as
+    // `local_key`.
 
-    /// Persistent random key; generated on first call.
-    QString localKey();
+    /// Removes the key an earlier version stored, if the file still holds one.
+    /// Nothing reads it any more. True when one was removed; the file is left
+    /// alone when it could not be read whole.
+    bool forgetLocalKey();
 
-    /// Replace the host key with a fresh random one (after a redemption).
-    /// Returns the new key.
-    QString rotateLocalKey();
+    /// When this installation first ran a version that binds a host session
+    /// to its browser's key as the session is made (unix seconds). Written
+    /// once, on the first call that reads the settings whole; 0 until then.
+    /// AuthManager::adoptLineKey reads which sessions are older than it.
+    qint64 hostSessionRepairBefore();
 
     // ── MW-BIND-v1 host identity key ────────────────────────────────────────
     //

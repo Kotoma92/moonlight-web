@@ -20,6 +20,7 @@
 #include "common/Edition.h"
 #include "common/Logger.h"
 #include "common/PairingCrypto.h"
+#include "network/RouterPortPools.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -478,6 +479,10 @@ void AppSettings::seedDocumentedDefaults()
         obj["stream_worker_enabled"] = true;
         changed = true;
     }
+    if (!obj.contains("media_base_port")) {
+        obj["media_base_port"] = static_cast<int>(mw::routerports::kMediaBasePort);
+        changed = true;
+    }
     if (!obj.contains("native_host_enabled")) {
         obj["native_host_enabled"] = true;
         changed = true;
@@ -626,7 +631,8 @@ void AppSettings::setStreamAspect(const QString& aspect)
     // "auto" = the client probes the host's real format from the black bars
     // Sunshine encodes and asks again with it; the explicit ratios are manual
     // overrides, ordered by market share in the Settings dropdown.
-    const QStringList valid = {"auto", "16:9", "16:10", "21:9", "4:3", "3:2", "32:9", "5:4"};
+    const QStringList valid = {"auto", "window", "16:9", "16:10", "21:9",
+                               "4:3",  "3:2",    "32:9", "5:4"};
     obj["stream_aspect"] = valid.contains(aspect) ? aspect : QStringLiteral("auto");
     writeAll(obj);
 }
@@ -879,6 +885,19 @@ void AppSettings::setStreamNotifications(bool enabled)
 {
     QJsonObject obj = readAll();
     obj["stream_notifications"] = enabled;
+    writeAll(obj);
+}
+
+bool AppSettings::remoteDesktopReturn() const
+{
+    QJsonObject obj = readAll();
+    return obj.value("remote_desktop_return").toBool(true);
+}
+
+void AppSettings::setRemoteDesktopReturn(bool enabled)
+{
+    QJsonObject obj = readAll();
+    obj["remote_desktop_return"] = enabled;
     writeAll(obj);
 }
 
@@ -1313,6 +1332,17 @@ void AppSettings::setUpnpEnabled(bool enabled)
     QJsonObject obj = readAll();
     obj["upnp_enabled"] = enabled;
     writeAll(obj);
+}
+
+uint16_t AppSettings::mediaBasePort() const
+{
+    const int kDefault = static_cast<int>(mw::routerports::kMediaBasePort);
+    const int port = readAll().value("media_base_port").toInt(kDefault);
+    const int maxBase = 65535 - mw::routerports::kMediaPortCount + 1;
+    if (port < 1024 || port > maxBase) {
+        return mw::routerports::kMediaBasePort;
+    }
+    return static_cast<uint16_t>(port);
 }
 
 // ── Internet Access ───────────────────────────────────────────────────────────
@@ -2148,42 +2178,34 @@ int AppSettings::internetConsentVersion() const
     return consent.value("version").toInt(1);
 }
 
-// ── Host key (host-machine recognition over the public domain) ────────────────
+// ── Host key ──────────────────────────────────────────────────────────────────
 
-static QString generateLocalKey()
-{
-    QByteArray raw(32, '\0');
-    for (int i = 0; i < raw.size(); ++i)
-        raw[i] = static_cast<char>(QRandomGenerator::system()->bounded(256));
-    return QString::fromLatin1(
-        raw.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
-}
-
-QString AppSettings::localKey()
+bool AppSettings::forgetLocalKey()
 {
     bool complete = false;
     QJsonObject obj = readAll(&complete);
-    QString key = obj.value("local_key").toString();
-    if (!key.isEmpty()) return key;
-    // A key is only made for a file read whole: one that could not be read may
-    // well hold one already.
-    if (!complete) return {};
-
-    key = generateLocalKey();
-    obj["local_key"] = key;
+    // A file that could not be read whole is not written over: what it holds
+    // would be lost with the key.
+    if (!complete || !obj.contains("local_key")) return false;
+    obj.remove("local_key");
     writeAll(obj);
-    return key;
+    return true;
 }
 
-QString AppSettings::rotateLocalKey()
+qint64 AppSettings::hostSessionRepairBefore()
 {
     bool complete = false;
     QJsonObject obj = readAll(&complete);
-    if (!complete) return {}; // could not be saved: the stored key stays
-    const QString key = generateLocalKey();
-    obj["local_key"] = key;
+    const qint64 stored = obj.value("host_session_repair_before").toInteger();
+    if (stored > 0) return stored;
+    // As for the local key: a file that could not be read may well hold the
+    // date already, and a later one would take in sessions it must not.
+    if (!complete) return 0;
+
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    obj["host_session_repair_before"] = now;
     writeAll(obj);
-    return key;
+    return now;
 }
 
 // ── MW-BIND-v1 host identity key ────────────────────────────────────────────────

@@ -20,6 +20,7 @@
 #include <QObject>
 #include <QHash>
 #include <QMap>
+#include <QSet>
 #include <functional>
 #include <optional>
 #include <QDateTime>
@@ -79,8 +80,9 @@ struct SessionInfo
 
     // The session that let this one in, by its opaque id: a device approved
     // by the QR code it showed, from that session (server/PhonePairing.h).
-    // Revoking that session revokes this one too (destroySession). Empty for
-    // every other way in, and when the host machine itself approved.
+    // Revoking that session revokes this one too (destroySession); when it
+    // logs out or runs out of time, this one stays, the administrator's. Empty
+    // for every other way in, and when the host machine itself approved.
     QString approvedBy;
 
     QJsonObject toJson() const
@@ -215,8 +217,9 @@ public:
     bool isEphemeralSession(const QString& token) const;
     /** Destroy the session a raw cookie token belongs to — the visitor logging
      *  themselves out. Unlike destroySession() this takes the raw token, so a
-     *  browser can only ever end its own session. Returns false when the token
-     *  matches none. */
+     *  browser can only ever end its own session. The sessions it let in stay,
+     *  the administrator's from now on: leaving is not a revocation. Returns
+     *  false when the token matches none. */
     bool logoutSession(const QString& token);
     /** True when the raw cookie token belongs to a valid *host* session (created
      *  by redeeming the host key — the browser runs on the host machine). */
@@ -229,6 +232,10 @@ public:
      *  access with the remote admin password. Orthogonal to isHostSession:
      *  same privileges, different proof. */
     bool isAdminSession(const QString& token) const;
+    /// The device name a valid session was paired under ("Bruno's iPhone"),
+    /// empty when there is none or the session is not valid. For an audit
+    /// line; never a credential.
+    QString sessionMachineName(const QString& token) const;
     /** Grant admin access to an existing session (after the password checked
      *  out). Takes the raw cookie token. Returns false for unknown sessions. */
     bool promoteSessionToAdmin(const QString& token);
@@ -259,6 +266,31 @@ public:
     /** The SPKI public key bound to the session a raw cookie @p token belongs
      *  to, or empty when there is none (or no such session). */
     QByteArray sessionPairingKey(const QString& token) const;
+
+    // ── Host sessions made before a session took its key at creation ───────
+    // A host session made through a rendezvous line by an earlier version
+    // holds no browser key. It takes the key of the line it next comes by,
+    // once: after that it is a session like any other, on that key only.
+
+    /** Sessions created before @p secs are the ones adoptLineKey looks at
+     *  (AppSettings::hostSessionRepairBefore). 0, the default, is none. */
+    void setHostSessionRepairBefore(qint64 secs) { m_hostSessionRepairBefore = secs; }
+
+    enum class LineKeyAdoption
+    {
+        NotConcerned, ///< not such a session, or no key on the line: nothing done
+        Deferred,     ///< such a session, from an address that cannot be this machine
+        Bound,        ///< the session now holds the line's key
+    };
+
+    /** Bind @p lineKey, the browser key a rendezvous line presented and
+     *  proved, to the session of the raw cookie @p token, when that session is
+     *  a valid host session made through a line, holds no key, and is older
+     *  than setHostSessionRepairBefore. @p plausibleAddress says whether the
+     *  request comes from an address that can be this machine (the check of
+     *  /api/auth/host-key); it is only asked for such a session. */
+    LineKeyAdoption adoptLineKey(const QString& token, const QByteArray& lineKey,
+                                 const std::function<bool()>& plausibleAddress);
     /** Revoke a session by its opaque id (the value exposed in sessions()/toJson,
      *  i.e. the token hash), NOT the raw cookie token. Every session it let in
      *  (SessionInfo::approvedBy) goes with it, and theirs in turn. */
@@ -269,6 +301,10 @@ public:
     void destroyAllSessions();
     /** Drop sessions inactive beyond SESSION_TTL_SECS. Called periodically. */
     void purgeExpiredSessions();
+    /// A session whose approver is gone by expiry, not by revocation, keeps
+    /// going without one, the administrator's to revoke (logoutSession does the
+    /// same for the sessions it let in): returns how many.
+    int keepDevicesOfEndedApprovers();
 
     /** Store geolocation data for a session after async lookup completes. */
     void setSessionGeo(const QString& token, const QString& city, const QString& country);
@@ -451,8 +487,9 @@ public:
      *  @p headers are the request's, with lower-case names. */
     static QString attemptAddress(const QString& peer, const QMap<QString, QString>& headers);
     /** Whether @p req comes from this machine's LAN: the one rule for what is
-     *  given to this LAN alone (routes/PairRequestRoutes.cpp: a device asks to
-     *  pair by its QR code; routes/AuthStatusRoute.cpp: this machine's name).
+     *  given to this LAN alone (routes/PairRequestRoutes.cpp, which narrows it
+     *  to this host's own links: a device asks to pair by its QR code;
+     *  routes/AuthStatusRoute.cpp: this machine's name).
      *
      *  On a line, by the address ICE settled on: a peer elsewhere cannot make a
      *  connectivity check to a private address succeed. On a socket, by the
@@ -517,6 +554,11 @@ private:
     QByteArray m_hmacKey;
     QHash<QString, RateLimitEntry> m_rateLimits; // rate-limit key -> entry
     QHash<QString, SessionInfo> m_sessions;      // token hash (id) -> SessionInfo
+    qint64 m_hostSessionRepairBefore = 0;        // see setHostSessionRepairBefore
+    QSet<QString> m_lineKeyDeferredSaid;         // session ids already logged as Deferred
+
+    /// bindSessionKey, with @p note appended to the line it logs.
+    bool bindKey(const QString& token, const QByteArray& spkiDer, const QString& note);
 
     struct HomeScreenKey
     {

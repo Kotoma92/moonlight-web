@@ -207,6 +207,24 @@ void AuthManager::loadSessions()
 
     Logger::info(
         QString("[AuthManager] Loaded %1 sessions (%2 expired, dropped)").arg(loaded).arg(skipped));
+    keepDevicesOfEndedApprovers();
+}
+
+int AuthManager::keepDevicesOfEndedApprovers()
+{
+    // A device let in by a session that ran out of time stays: it is the
+    // administrator's to revoke from now on, like a device paired with the PIN.
+    // Only a revocation (destroySession) takes the devices along.
+    int kept = 0;
+    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
+        if (it->approvedBy.isEmpty() || m_sessions.contains(it->approvedBy)) continue;
+        it->approvedBy.clear();
+        kept++;
+    }
+    if (kept > 0)
+        Logger::info(
+            QString("[Auth] %1 device(s) kept after the session that let them in ended").arg(kept));
+    return kept;
 }
 
 QString AuthManager::generatePin()
@@ -768,6 +786,18 @@ bool AuthManager::logoutSession(const QString& token)
     if (token.isEmpty()) return false;
     const QString id = hashToken(token);
     if (!m_sessions.contains(id)) return false;
+    // Leaving is not a revocation: a device this session let in stays, the
+    // administrator's to revoke from now on, as when its time runs out.
+    int kept = 0;
+    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
+        if (it->approvedBy != id) continue;
+        it->approvedBy.clear();
+        kept++;
+    }
+    if (kept > 0)
+        Logger::info(
+            QString("[Auth] %1 device(s) kept after the session that let them in logged out")
+                .arg(kept));
     destroySession(id);
     return true;
 }
@@ -791,6 +821,13 @@ bool AuthManager::isAdminSession(const QString& token) const
     if (!validateSession(token)) return false;
     auto it = m_sessions.find(hashToken(token));
     return it != m_sessions.end() && it->isAdmin;
+}
+
+QString AuthManager::sessionMachineName(const QString& token) const
+{
+    if (!validateSession(token)) return QString();
+    auto it = m_sessions.find(hashToken(token));
+    return it != m_sessions.end() ? it->machineName : QString();
 }
 
 bool AuthManager::promoteSessionToAdmin(const QString& token)
@@ -839,6 +876,11 @@ void AuthManager::touchSession(const QString& token)
 
 bool AuthManager::bindSessionKey(const QString& token, const QByteArray& spkiDer)
 {
+    return bindKey(token, spkiDer, QString());
+}
+
+bool AuthManager::bindKey(const QString& token, const QByteArray& spkiDer, const QString& note)
+{
     if (token.isEmpty()) return false;
     if (!PairingCrypto::isValidP256Spki(spkiDer)) {
         Logger::warning(QStringLiteral("[AuthManager] Rejected an unparseable pairing key"));
@@ -865,9 +907,37 @@ bool AuthManager::bindSessionKey(const QString& token, const QByteArray& spkiDer
 
     it->pairingKey = spkiDer;
     if (!it->ephemeral) saveSessions();
-    Logger::info(QStringLiteral("[AuthManager] Bound pairing key %1 to session %2")
-                     .arg(PairingCrypto::keyId(spkiDer).left(12), it->token.left(8)));
+    Logger::info(QStringLiteral("[AuthManager] Bound pairing key %1 to session %2%3")
+                     .arg(PairingCrypto::keyId(spkiDer).left(12), it->token.left(8), note));
     return true;
+}
+
+AuthManager::LineKeyAdoption
+AuthManager::adoptLineKey(const QString& token, const QByteArray& lineKey,
+                          const std::function<bool()>& plausibleAddress)
+{
+    if (m_hostSessionRepairBefore <= 0 || !validateSession(token))
+        return LineKeyAdoption::NotConcerned;
+    const auto it = m_sessions.constFind(hashToken(token));
+    if (it == m_sessions.constEnd() || !it->isHost || !it->viaTunnel || !it->pairingKey.isEmpty() ||
+        it->createdAt >= m_hostSessionRepairBefore)
+        return LineKeyAdoption::NotConcerned;
+    if (!PairingCrypto::isValidP256Spki(lineKey)) return LineKeyAdoption::NotConcerned;
+
+    if (!plausibleAddress || !plausibleAddress()) {
+        // Once per session and per run: every request of that page comes here.
+        if (!m_lineKeyDeferredSaid.contains(it->token)) {
+            m_lineKeyDeferredSaid.insert(it->token);
+            Logger::info(QStringLiteral("[AuthManager] Session %1 of before the update keeps no "
+                                        "pairing key: its request does not come from an address "
+                                        "that can be this machine")
+                             .arg(it->token.left(8)));
+        }
+        return LineKeyAdoption::Deferred;
+    }
+    return bindKey(token, lineKey, QStringLiteral(" (session of before the update)"))
+               ? LineKeyAdoption::Bound
+               : LineKeyAdoption::NotConcerned;
 }
 
 QByteArray AuthManager::sessionPairingKey(const QString& token) const
@@ -1068,6 +1138,7 @@ void AuthManager::purgeExpiredSessions()
         }
     }
     if (removed > 0) {
+        keepDevicesOfEndedApprovers();
         saveSessions();
         emit sessionsChanged();
         Logger::info(QString("[Auth] Purged %1 expired session(s)").arg(removed));

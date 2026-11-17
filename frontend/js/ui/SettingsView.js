@@ -96,6 +96,7 @@ import {
     fitPixelBudget,
     autoMaxHeightFor,
     readResolutionChoice,
+    windowPixelSize,
 } from '../util/StreamResolution.js';
 import { previewCeiling } from '../util/AutoCeiling.js';
 import {
@@ -189,10 +190,11 @@ export class SettingsView {
         this._hdrEnabled = false;
         this._chroma444 = false;
         this._muteHostAudio = true;
+        this._muteInBackground = false;
         // Which sound the stream carries (audioSourceOptions.js): 'all' (default,
         // as an OS behaves), 'focused' (Automatic: the app in focus, a game) or
         // 'app:<exe>'. The host says whether it can (Windows 11 native host);
-        // elsewhere the choice is shown locked.
+        // elsewhere the choice is not shown (the MoonlightWeb Host section).
         this._audioSource = 'all';
         this._audioSourceSupported = false;
         // The apps with sound on the host, to pick one from.
@@ -612,6 +614,18 @@ export class SettingsView {
         }
     }
 
+    /**
+     * Does the host give this browser admin access? Its own answer
+     * (/api/auth/status), asked once per visit to this page; no answer is a no.
+     */
+    async _adminAccessSaid() {
+        this._authStatusAsked ??= Promise.resolve()
+            .then(() => BackendClient.getAuthStatus())
+            .catch(() => null);
+        const status = await this._authStatusAsked;
+        return status?.is_localhost === true;
+    }
+
     async _loadState() {
         // 1. Try localStorage first (per-browser preferences)
         const stored = localStorage.getItem(STORAGE_KEY);
@@ -637,6 +651,12 @@ export class SettingsView {
             this._audioSourceSupported = data.audio_source_focused_supported === true;
             // The administrator's ceilings: what the controls below may offer.
             setStreamLimits(data);
+            // Where the host sees this browser, as a launch reads it: the
+            // automatic bitrate takes the LAN rule there (util/AutoBitrate.js),
+            // and the bitrate's line says which. A server that does not say:
+            // neither, the Internet rule.
+            this._viewerPath =
+                data.viewer_lan === true ? 'lan' : data.viewer_lan === false ? 'internet' : null;
 
             if (!stored) {
                 this._applySettings(data);
@@ -685,6 +705,7 @@ export class SettingsView {
         this._hdrEnabled = data.hdr_enabled === true;
         this._chroma444 = data.chroma_444_enabled === true;
         this._muteHostAudio = data.mute_host_audio !== false;
+        this._muteInBackground = data.mute_in_background === true;
         this._audioSource = normalizeAudioSource(data.audio_source);
         this._micEnabled = micRequested(data);
         this._micChosen = data.mic_chosen === true;
@@ -726,8 +747,8 @@ export class SettingsView {
         return aspectToNumber(aspect);
     }
 
-    _computeAutoBitrate(height, aspect, chroma444, hdr) {
-        return limitBitrateMbps(computeAutoBitrate(height, aspect, chroma444, hdr));
+    _computeAutoBitrate(height, aspect, chroma444, hdr, lan = false) {
+        return limitBitrateMbps(computeAutoBitrate(height, aspect, chroma444, hdr, lan));
     }
 
     /**
@@ -829,11 +850,17 @@ export class SettingsView {
             IS_TV,
             autoMaxHeightFor(budget),
         );
-        const aspect =
-            choice.mode === 'fixed'
-                ? this.container.querySelector('#settings-stream-aspect')?.value ||
-                  this._streamAspect
-                : ref.aspect;
+        const chosenAspect =
+            this.container.querySelector('#settings-stream-aspect')?.value || this._streamAspect;
+        let aspect = ref.aspect;
+        if (chosenAspect && chosenAspect !== 'auto') {
+            if (chosenAspect === 'window') {
+                const win = windowPixelSize();
+                aspect = win ? `${win.width}:${win.height}` : ref.aspect;
+            } else {
+                aspect = chosenAspect;
+            }
+        }
         const size = { height: ref.height, aspect };
         if (choice.mode !== 'auto' && rateNamed) return { size, fps: rate };
         const bounded = fitPixelBudget(size, rate, {
@@ -863,7 +890,15 @@ export class SettingsView {
         // 1440p120 the launch turns into 1080p120 recommends a bitrate for
         // pixels nobody ever sends.
         const bounded = this._budgetedStream(this._readResolutionChoice(), rate, chosen > 0);
-        return this._computeAutoBitrate(bounded.size.height, bounded.size.aspect, chroma444, hdr);
+        // The LAN rule where the host sees this browser on its own network:
+        // what a launch from here will ask for (app.js _autoBitrateFor).
+        return this._computeAutoBitrate(
+            bounded.size.height,
+            bounded.size.aspect,
+            chroma444,
+            hdr,
+            this._viewerPath === 'lan',
+        );
     }
 
     /**
@@ -892,10 +927,39 @@ export class SettingsView {
         if (option) option.textContent = this._autoFpsLabel();
     }
 
+    /** "· auto", and where the host sees this browser when the server said. */
+    _bitrateAutoMark() {
+        if (!this._bitrateAuto) return '';
+        if (this._viewerPath === 'lan') return t('settings.bitrateAutoLan');
+        if (this._viewerPath === 'internet') return t('settings.bitrateAutoInternet');
+        return t('settings.bitrateAuto');
+    }
+
+    /**
+     * The house (the host's own network) or the globe (the Internet) before
+     * the bitrate, whether it is the estimate's or the user's: where this
+     * browser stands decides what Auto gives. Nothing when the server did
+     * not say.
+     */
+    _bitrateNetIcon() {
+        if (this._viewerPath !== 'lan' && this._viewerPath !== 'internet') return '';
+        const lan = this._viewerPath === 'lan';
+        const label = this.esc(t(lan ? 'settings.bitrateNetLan' : 'settings.bitrateNetInternet'));
+        const shape = lan
+            ? '<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>'
+            : '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>' +
+              '<path d="M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9z"/>';
+        return (
+            `<svg class="settings-bitrate-net" id="settings-bitrate-net" role="img" aria-label="${label}" ` +
+            'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+            `stroke-linecap="round" stroke-linejoin="round"><title>${label}</title>${shape}</svg>`
+        );
+    }
+
     /** Show whether the bitrate is the estimate's or the user's own. */
     _syncBitrateMark() {
         const mark = this.container.querySelector('#settings-bitrate-auto');
-        if (mark) mark.textContent = this._bitrateAuto ? t('settings.bitrateAuto') : '';
+        if (mark) mark.textContent = this._bitrateAutoMark();
         // The way back to the estimate, offered only once it has been left:
         // a stray click on the track (a TV's cursor) was otherwise kept for
         // good, with nothing to undo it but a reset of every setting.
@@ -1003,7 +1067,8 @@ export class SettingsView {
     }
 
     /** Persist current internal state to localStorage (all clients)
-     *  and to the server (localhost only — updates defaults for all browsers). */
+     *  and to the server (the host's own page at localhost only — updates
+     *  defaults for all browsers). */
     async _saveToStorage() {
         const settings = {
             video_codec: this._videoCodec,
@@ -1015,17 +1080,13 @@ export class SettingsView {
             stream_resolution: this._streamResolution,
             stream_custom_width: this._customWidth,
             stream_custom_height: this._customHeight,
-            // Auto, always, outside a debug build — see _applySettings. A
-            // ratio a debug build forces is marked as such, which is what
-            // app.js looks for before honouring a stored ratio at launch.
-            stream_aspect: this._debugBuild ? this._streamAspect : 'auto',
-            ...(this._debugBuild && this._streamAspect !== 'auto'
-                ? { stream_aspect_forced: true }
-                : {}),
+            stream_aspect: this._streamAspect,
+            ...(this._streamAspect !== 'auto' ? { stream_aspect_forced: true } : {}),
             stream_fps: this._streamFps,
             hdr_enabled: this._hdrEnabled,
             chroma_444_enabled: this._chroma444,
             mute_host_audio: this._muteHostAudio,
+            mute_in_background: this._muteInBackground,
             audio_source: this._audioSource,
             seamless_switching: true,
             touch_sensitivity: this._touchSensitivity,
@@ -1062,10 +1123,13 @@ export class SettingsView {
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 
-        // Persist to server when on localhost, so settings.json is updated
-        // and all other clients get these defaults on first visit.
+        // Persist to server from the host's own page at localhost, so
+        // settings.json is updated and all other clients get these defaults on
+        // first visit. Only where the host gives this browser admin access,
+        // which it gives nobody in booth mode: the address says nothing of it.
         const host = window.location.hostname;
-        if ((host === 'localhost' || host === '127.0.0.1') && !BackendClient.adminLocked) {
+        const onLoopback = host === 'localhost' || host === '127.0.0.1';
+        if (onLoopback && (await this._adminAccessSaid())) {
             // PyroWave is a device's own choice (the one on Ethernet), never
             // the codec every other browser starts with: the server's default
             // keeps what it had.
@@ -1248,6 +1312,57 @@ export class SettingsView {
             clearInterval(this._audioFocusTimer);
             this._audioFocusTimer = null;
         }
+    }
+
+    // --- MoonlightWeb Host ---
+
+    /**
+     * This browser's choices that only a MoonlightWeb host acts on: the admin
+     * page's section of the same name, on the viewer's side. Sunshine, Apollo
+     * and Wolf ignore both, and among the Advanced settings they read as if
+     * they did not. Same rule as the admin's section: each one is shown only
+     * where a host can honour it, and the section only when it has one of them
+     * to offer — so a Sunshine user no longer meets a greyed-out choice that
+     * can never be theirs.
+     */
+    _renderNativeHostSection() {
+        const audioSource = this._audioSourceSupported;
+        const othersOff = !!this._othersOffOffer;
+        if (!audioSource && !othersOff) return '';
+        return `
+                <div class="settings-section" id="settings-section-native-host">
+                    <h3 class="settings-section-title">${t('admin.nativeHost')}</h3>
+                    <p class="settings-section-desc">${t('settings.nativeHostDesc')}</p>
+                    ${
+                        audioSource
+                            ? `
+                    <div class="settings-field">
+                        <label class="settings-label" for="settings-audio-source">
+                            ${t('settings.audioSource')}
+                        </label>
+                        <span class="setting-desc">${t('settings.audioSourceDesc')}</span>
+                        <select id="settings-audio-source" class="settings-select">
+                            ${this._audioSourceOptionsHtml()}
+                        </select>
+                    </div>`
+                            : ''
+                    }
+                    ${
+                        othersOff
+                            ? `
+                    <div class="settings-field" id="settings-others-off-field">
+                        <label class="settings-checkbox-label">
+                            <input type="checkbox" id="settings-others-off"
+                                ${othersOffChecked(this._othersOff, this._othersOffOffer) ? 'checked' : ''} />
+                            <span class="settings-checkbox-text">
+                                <strong>${t('settings.othersOff')}</strong>
+                            </span>
+                        </label>
+                        <span class="setting-desc">${t('settings.othersOffDesc')}</span>
+                    </div>`
+                            : ''
+                    }
+                </div>`;
     }
 
     // --- Stream audio from ---
@@ -1550,6 +1665,9 @@ export class SettingsView {
             const hdr = this.container.querySelector('#settings-hdr')?.checked ?? this._hdrEnabled;
             const chroma444 =
                 this.container.querySelector('#settings-chroma-444')?.checked ?? this._chroma444;
+            const muteInBackground =
+                this.container.querySelector('#settings-mute-in-background')?.checked ??
+                this._muteInBackground;
             const sensRaw = parseFloat(
                 this.container.querySelector('#settings-sensitivity')?.value,
             );
@@ -1595,6 +1713,7 @@ export class SettingsView {
             this._streamFps = fps;
             this._hdrEnabled = hdr;
             this._chroma444 = chroma444;
+            this._muteInBackground = muteInBackground;
             this._touchSensitivity = sensitivity;
             this._mouseSensitivity = mouseSensitivity;
             this._touchScreen = touchScreen;
@@ -1628,6 +1747,7 @@ export class SettingsView {
         this._hdrEnabled = false;
         this._chroma444 = false;
         this._muteHostAudio = true;
+        this._muteInBackground = false;
         this._micEnabled = true;
         this._micChosen = false;
         this._micDevice = null;
@@ -1947,20 +2067,18 @@ export class SettingsView {
                         </div>`
                 : '';
 
-        // Aspect: Auto for everyone — the resolution choices above fix the
-        // shape, and a forced ratio was the harder thing to understand. The
-        // dropdown ("Auto", then the real screen formats, most common first)
-        // exists in debug builds only, where the mechanism is kept for tests.
-        if (!this._debugBuild) this._streamAspect = 'auto';
-        const aspectOptions = [{ value: 'auto', label: t('settings.aspectAuto') }]
+        // Aspect: Auto (screen), Window, or fixed standard ratios.
+        const aspectOptions = [
+            { value: 'auto', label: t('settings.aspectAuto') },
+            { value: 'window', label: t('settings.aspectWindow') },
+        ]
             .concat(SCREEN_ASPECTS.map((a) => ({ value: a.value, label: a.value })))
             .map(
                 (a) =>
                     `<option value="${a.value}" ${a.value === this._streamAspect ? 'selected' : ''}>${this.esc(a.label)}</option>`,
             )
             .join('');
-        const aspectHtml = this._debugBuild
-            ? `
+        const aspectHtml = `
                     <div class="settings-field">
                         <label class="settings-label" for="settings-stream-aspect">
                             ${t('settings.streamAspect')}
@@ -1969,8 +2087,7 @@ export class SettingsView {
                         <select id="settings-stream-aspect" class="settings-select">
                             ${aspectOptions}
                         </select>
-                    </div>`
-            : '';
+                    </div>`;
 
         // FPS options. Auto first and default: the rate this very screen
         // refreshes at, which is also what the native host's virtual display
@@ -2137,8 +2254,8 @@ export class SettingsView {
 
                     <div class="settings-field">
                         <label class="settings-label" for="settings-stream-bitrate">
-                            ${t('settings.bitrate')} <strong id="settings-bitrate-value">${this._streamBitrateMbps}</strong> ${t('settings.bitrateUnit')}
-                            <span id="settings-bitrate-auto" class="settings-bitrate-auto">${this._bitrateAuto ? this.esc(t('settings.bitrateAuto')) : ''}</span>
+                            ${t('settings.bitrate')} ${this._bitrateNetIcon()}<strong id="settings-bitrate-value">${this._streamBitrateMbps}</strong> ${t('settings.bitrateUnit')}
+                            <span id="settings-bitrate-auto" class="settings-bitrate-auto">${this.esc(this._bitrateAutoMark())}</span>
                         </label>
                         <span class="setting-desc">${t('settings.bitrateDesc')}</span>
                         <input type="range" id="settings-stream-bitrate"
@@ -2197,21 +2314,16 @@ export class SettingsView {
                         <span class="setting-desc">${t('settings.muteHostDesc')}</span>
                     </div>
 
-                    <div class="settings-field${this._audioSourceSupported ? '' : ' settings-field-locked'}">
-                        <label class="settings-label" for="settings-audio-source">
-                            ${t('settings.audioSource')}
+                    <div class="settings-field">
+                        <label class="settings-checkbox-label">
+                            <input type="checkbox" id="settings-mute-in-background"
+                                ${this._muteInBackground ? 'checked' : ''} />
+                            <span class="settings-checkbox-text">
+                                <strong>${t('settings.muteInBackground')}</strong>
+                            </span>
                         </label>
-                        <span class="setting-desc">${t(
-                            this._audioSourceSupported
-                                ? 'settings.audioSourceDesc'
-                                : 'settings.audioSourceUnsupported',
-                        )}</span>
-                        <select id="settings-audio-source" class="settings-select"
-                                ${this._audioSourceSupported ? '' : 'disabled'}>
-                            ${this._audioSourceOptionsHtml()}
-                        </select>
+                        <span class="setting-desc">${t('settings.muteInBackgroundDesc')}</span>
                     </div>
-
                     <div class="settings-field${micSupported() ? '' : ' settings-field-locked'}">
                         <label class="settings-label" for="settings-mic-device">
                             ${t('settings.micDevice')}
@@ -2245,21 +2357,6 @@ export class SettingsView {
                         </label>
                         <span class="setting-desc">${t('settings.quitAppOnStopDesc')}</span>
                     </div>
-                    ${
-                        this._othersOffOffer
-                            ? `
-                    <div class="settings-field" id="settings-others-off-field">
-                        <label class="settings-checkbox-label">
-                            <input type="checkbox" id="settings-others-off"
-                                ${othersOffChecked(this._othersOff, this._othersOffOffer) ? 'checked' : ''} />
-                            <span class="settings-checkbox-text">
-                                <strong>${t('settings.othersOff')}</strong>
-                            </span>
-                        </label>
-                        <span class="setting-desc">${t('settings.othersOffDesc')}</span>
-                    </div>`
-                            : ''
-                    }
 
                     <div class="settings-field">
                         <label class="settings-checkbox-label">
@@ -2390,6 +2487,9 @@ export class SettingsView {
                         <span class="setting-desc">${t('settings.showPerfStatsDesc')}</span>
                     </div>
                 </div>
+
+                <!-- ── MoonlightWeb Host ───────────────────────────────────── -->
+                ${this._renderNativeHostSection()}
 
                 <!-- ── Language ────────────────────────────────────────────── -->
                 <div class="settings-section">
@@ -2682,12 +2782,10 @@ export class SettingsView {
         const heightSelect = this.container.querySelector('#settings-stream-height');
         if (heightSelect)
             heightSelect.addEventListener('change', () => {
-                // Any choice fixes the shape on its own: the ratio goes to
-                // Auto with it (the debug-only dropdown follows on re-render).
-                this._streamAspect = 'auto';
+                const choice = this._readResolutionChoice();
+                if (choice.mode === 'custom') this._streamAspect = 'auto';
                 this._applyAutoBitrate();
                 this._syncAutoFpsLabel();
-                const choice = this._readResolutionChoice();
                 const custom = choice.mode === 'custom';
                 const showing = !!this.container.querySelector('#settings-custom-width');
                 this._autoSave();
@@ -2780,6 +2878,13 @@ export class SettingsView {
         if (muteHostCheck)
             muteHostCheck.addEventListener('change', () => {
                 this._muteHostAudio = muteHostCheck.checked;
+                this._autoSave();
+            });
+
+        const muteInBackgroundCheck = this.container.querySelector('#settings-mute-in-background');
+        if (muteInBackgroundCheck)
+            muteInBackgroundCheck.addEventListener('change', () => {
+                this._muteInBackground = muteInBackgroundCheck.checked;
                 this._autoSave();
             });
 

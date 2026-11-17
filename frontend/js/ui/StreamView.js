@@ -38,9 +38,11 @@ import {
     measureRefreshRate,
     onRefreshRateChange,
 } from '../util/RefreshRate.js';
-import { devicePixelSize } from '../util/StreamResolution.js';
+import { devicePixelSize, windowPixelSize } from '../util/StreamResolution.js';
+import { hostScreenCaps } from '../util/HostLimit.js';
 import { PeriodicStallDetector } from '../stream/PeriodicStallDetector.js';
 import { GamepadManager } from '../stream/GamepadManager.js';
+import { PadNumberNotice } from '../stream/HostPadNumber.js';
 import { HidPassthrough } from '../hid/HidPassthrough.js';
 import { GamepadRemapDialog } from './GamepadRemapDialog.js';
 import { padKey, padName } from '../stream/gamepadMapping.js';
@@ -97,7 +99,7 @@ import {
     supportsGamingMode,
     lockFreeLookWanted,
 } from '../util/BrowserDetect.js';
-import { noteAv1Failed, noteHevcFailed } from '../util/CodecAuto.js';
+import { Av1Watch, noteAv1Failed, noteAv1Proven, noteHevcFailed } from '../util/CodecAuto.js';
 import * as RemoteNav from './RemoteNav.js';
 import { StreamRemoteMenu } from './StreamRemoteMenu.js';
 import { RemotePointer } from '../stream/RemotePointer.js';
@@ -123,6 +125,7 @@ import {
     formatMainThread,
 } from '../stream/PipelineDiag.js';
 import { shouldFlushAtKeyframe } from '../stream/DecodeQueuePolicy.js';
+import { queueBrake } from '../stream/DecodeBrake.js';
 import { DecodeDelay, DecodeQueueSignal } from '../stream/DecodeQueueSignal.js';
 import { DecodeRateGovernor } from '../stream/DecodeRateGovernor.js';
 import { SilentDecoderWatch } from '../stream/SilentDecoderWatch.js';
@@ -544,6 +547,13 @@ export function mwsrSplitLabel(view) {
     return `Split ${n}/${MWSR_SPLIT_VIEWS.length} · ${what[view]}`;
 }
 
+/**
+ * How long before "visibilitychange hidden" a decoder error is still iOS
+ * taking the decoder back: on an iPhone it often comes first, 44 to 107 ms
+ * ahead of the event (Safari 26.5, 11/11, two spells of three).
+ */
+export const IOS_ERROR_BEFORE_HIDDEN_MS = 300;
+
 export class StreamView {
     constructor(
         container,
@@ -580,6 +590,11 @@ export class StreamView {
         this._quitAppOnStop = opts.quitAppOnStop === true;
         // "Start streams in fullscreen" (settings) — see _applyFullscreenOnStart.
         this._fullscreenOnStart = opts.fullscreenOnStart === true;
+        // "Mute when in background" (settings). Mutes stream sound when this
+        // window is not active on the client machine.
+        this._muteInBackground = opts.muteInBackground === true;
+        this._isWindowActive =
+            typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true;
         // Backend stream slot this view runs on (0 = /ws ports, 1 = /ws1) and
         // the uniqueid it launched with — quit() scopes its /quit with them so
         // retiring one leg of a dual stream never cancels the other.
@@ -635,7 +650,11 @@ export class StreamView {
         // tapping where it points, and the trackpad model clicked wherever the
         // host's pointer already was instead (03/10/2026, a Mi TV).
         this._touchScreen = touchScreen === true || IS_TV;
-        this._lockFreeLook = lockFreeLookWanted();
+        // iOS/iPadOS never grants the pointer lock: there a refusal is final,
+        // and the mouse turns to relative look (A23). Elsewhere a refusal is
+        // a moment (Chrome right after Escape), and the next click asks again.
+        this._lockFreeLook = lockFreeLookWanted(IS_IOS);
+        this._lockRefusalFinal = IS_IOS;
         // A TV's taps come from its browser's cursor: one off the picture is
         // ignored (_tvTapOffPicture), not pinned to the nearest edge.
         this._tvCursor = IS_TV;
@@ -1238,6 +1257,8 @@ export class StreamView {
         // `mousemove` delivers. Decided in _bindPointerRaw; while it is on, the
         // mousemove handlers keep their cursor bookkeeping and stop sending.
         this._nativeHost = opts.nativeHost === true;
+        /** @type {PadNumberNotice | null} the native host's word on pad numbers */
+        this._padNumber = null;
         // The virtual display and the apps opened before the stream on two
         // GPUs (util/vdGpuApartNotice.js): watched only when the host says so.
         this._vdGpuApart = opts.vdGpuApart || null;
@@ -1262,6 +1283,7 @@ export class StreamView {
         // onClientScreenChanged, which relaunches at the new size.
         this._offScreenChange = null;
         this._screenSizeSeen = null;
+        this._streamAspect = opts.streamAspect || opts.aspectChoice || 'auto';
         this.onClientScreenChanged = null;
         // The host heals a lost frame with a delta (NVENC reference
         // invalidation, /start says so): after a gap this view names the
@@ -1275,6 +1297,14 @@ export class StreamView {
         this._frameSize =
             opts.frameSize && opts.frameSize.width > 0 && opts.frameSize.height > 0
                 ? { width: opts.frameSize.width, height: opts.frameSize.height }
+                : null;
+        // The native host's own screen and what this launch asked of it, the
+        // screen then following each `displayformat`: the stats card says
+        // "host limit" beside the resolution when that screen is what held
+        // the stream down (util/HostLimit.js). Null for every other host.
+        this._hostScreen =
+            opts.hostScreen && opts.hostScreen.display && opts.hostScreen.asked
+                ? { display: { ...opts.hostScreen.display }, asked: opts.hostScreen.asked }
                 : null;
         // "NVENC" / "AMF" / "oneVPL" — which silicon block encodes this stream.
         // Empty for every other host. Shown in the latency detail, not in the
@@ -1738,11 +1768,18 @@ export class StreamView {
         this._composedKey = null;
         this._onPaste = (e) => this.handlePaste(e);
         this._onPointerDownFlush = () => this._flushPendingClipboard();
-        this._onWindowBlur = () => this._releaseAllPhysKeys();
+        this._onWindowBlur = (e) => {
+            if (e && e.target && e.target !== window && e.target !== document) return;
+            this._releaseAllPhysKeys();
+            this._setWindowActive(false);
+        };
         // Regaining window focus (Alt-Tab back from another app) may leave the
         // pointer over the streamed picture without a mousemove — re-apply the
         // cursor hide so the local arrow doesn't double the host cursor.
-        this._onWindowFocus = () => this._refreshLocalCursorOnFocus();
+        this._onWindowFocus = () => {
+            this._setWindowActive(true);
+            this._refreshLocalCursorOnFocus();
+        };
         this._onMouseMove = (e) => this.handleMouseMove(e);
         this._onMouseDown = (e) => this.handleMouseDown(e);
         this._onMouseUp = (e) => this.handleMouseUp(e);
@@ -1892,8 +1929,11 @@ export class StreamView {
             if (document.visibilityState === 'hidden') {
                 this._releaseAllPhysKeys();
                 this._touchPadLetGo();
+                this._noteHiddenAfterError(performance.now());
+                this._setWindowActive(false);
             }
             if (document.visibilityState === 'visible' && !this._quitting) {
+                this._setWindowActive(true);
                 this._resyncAfterHidden();
                 // Coming back to the tab may leave the pointer over the picture
                 // without a mousemove — re-hide the local cursor (double cursor).
@@ -2190,6 +2230,7 @@ export class StreamView {
         const ok = await this.audioPipeline.init();
         if (ok) {
             console.log('[StreamView] AudioPipeline ready');
+            this._applyVolume();
             // Resume if the context was suspended (autoplay policy).
             // StreamView is created after a user click, so this usually succeeds.
             if (this.audioPipeline.context && this.audioPipeline.context.state === 'suspended') {
@@ -2383,6 +2424,7 @@ export class StreamView {
             // Standby: muted until promote (no double audio with the live view).
             if (this._standby) this.audioEl.muted = true;
             if (this._nativeAudio && this.webrtc) this.webrtc.audioElement = this.audioEl;
+            this._applyVolume();
         }
 
         // Transparent input-capture layer covering the whole canvas/video area.
@@ -2964,17 +3006,65 @@ export class StreamView {
                 if (this.videoCodec === CODEC_AV1) frame = cropToAnnounced(frame, this._frameSize);
                 this.onDecodedFrame(frame);
             },
-            error: (err) => {
-                console.error('[StreamView] VideoDecoder error:', err.message, err);
-                if (err.code) console.error('[StreamView] Error code:', err.code);
-                console.warn(
-                    '[StreamView] ' +
-                        this._decoderTrail.line(err, performance.now(), this.videoCodec),
-                );
-                this._handleDecoderError(err);
-            },
+            error: (err) => this._onDecoderError(err),
         });
         console.log('[StreamView] VideoDecoder created, state=' + this.decoder.state);
+    }
+
+    /**
+     * The decoder threw. On a hidden page that is iOS taking the hardware
+     * decoder back as the app goes to the background (Chrome and Safari on
+     * an iPhone, "Decoder failure" a few hundred ms after "visibility hidden",
+     * every one of the 13 in the prod log of 07-11/11): the stream did nothing
+     * wrong. It is logged as what it is, and the decoder is rebuilt without
+     * spending one of the recovery attempts meant for a broken stream — once
+     * per spell in the background: a desktop tab keeps decoding while hidden,
+     * and a decoder that keeps failing there is a broken stream again.
+     */
+    _onDecoderError(err) {
+        const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+        const forgiven = hidden && !this._hiddenLossForgiven;
+        if (forgiven) this._hiddenLossForgiven = true;
+        if (hidden) {
+            console.warn(
+                '[StreamView] VideoDecoder lost while the page is hidden: ' +
+                    (err && err.message) +
+                    ' — rebuilt, a keyframe asked for when the page is back',
+            );
+        } else {
+            console.error('[StreamView] VideoDecoder error:', err && err.message, err);
+            if (err && err.code) console.error('[StreamView] Error code:', err.code);
+        }
+        console.warn(
+            '[StreamView] ' + this._decoderTrail.line(err, performance.now(), this.videoCodec),
+        );
+        const before = this._recoveryAttempts;
+        this._handleDecoderError(err, { hidden: forgiven });
+        // Counted while the page still looked visible: the "hidden" that may
+        // follow within IOS_ERROR_BEFORE_HIDDEN_MS gives it back.
+        this._countedErrorAt = this._recoveryAttempts > before ? performance.now() : -1;
+    }
+
+    /**
+     * The page went hidden at @p nowMs. A decoder error counted just before
+     * it was iOS taking the decoder back (see IOS_ERROR_BEFORE_HIDDEN_MS):
+     * its attempt is given back, and it takes this spell's one pardon, as
+     * an error after the event would have. Returns whether it did.
+     */
+    _noteHiddenAfterError(nowMs) {
+        const at = this._countedErrorAt;
+        if (typeof at !== 'number' || at < 0) return false;
+        this._countedErrorAt = -1;
+        if (nowMs - at > IOS_ERROR_BEFORE_HIDDEN_MS || this._hiddenLossForgiven) return false;
+        this._hiddenLossForgiven = true;
+        // A frame decoded since has already reset the count.
+        if (this._recoveryAttempts > 0) this._recoveryAttempts--;
+        console.warn(
+            '[StreamView] The decoder error ' +
+                Math.round(nowMs - at) +
+                ' ms before the page went hidden was iOS taking the decoder back — attempt given back',
+        );
+        return true;
     }
 
     /**
@@ -2993,8 +3083,12 @@ export class StreamView {
      *
      * After recovery, the next keyframe triggers configureDecoder() which
      * reconfigures the new decoder and resumes normal playback.
+     *
+     * `opts.hidden`: the error came while the page was hidden (see
+     * _onDecoderError) — the decoder is rebuilt the same way, but the
+     * attempt is not counted.
      */
-    _handleDecoderError(err) {
+    _handleDecoderError(err, opts = {}) {
         // Guard: prevent recovery during quit (or the manual-quit animation)
         if (this._quitting || this._manualQuitting) return;
         // Guard: prevent re-entrant recovery (error callback may fire during
@@ -3002,8 +3096,9 @@ export class StreamView {
         if (this._decoderRecovering) return;
         this._diag.noteRecovery('reset');
         // Guard: limit total recovery attempts to avoid infinite loops on
-        // a fundamentally broken connection
-        this._recoveryAttempts++;
+        // a fundamentally broken connection. A decoder the system took back
+        // from a hidden page says nothing about the stream.
+        if (!opts.hidden) this._recoveryAttempts++;
 
         // Decode capability failure: the config passed isConfigSupported() but the
         // browser cannot actually decode it (e.g. Android Chrome with HEVC Main10
@@ -6206,8 +6301,9 @@ export class StreamView {
      * pacer would pin its reserve — so they are re-primed here, and the
      * transport is told the silence was ours. Frames the host evicted while
      * we were away arrive as a frameId gap and take the ordinary path: named
-     * to the host, healed with a delta. Nothing is requested here — except
-     * that the next link report carries `resumed`, so the host's governor
+     * to the host, healed with a delta. Nothing is requested here — but a
+     * keyframe when the decoder lost its reference meanwhile (below), and
+     * the next link report carries `resumed`, so the host's governor
      * does not read those gaps as the link's and undoes the cut it made when
      * our reports stopped (a frozen page cost five quiet reports to climb
      * back, measured 04/09/2026).
@@ -6233,6 +6329,16 @@ export class StreamView {
             this.webrtc.noteResumed();
         }
         if (this._gamepadManager) this._gamepadManager.resendAll();
+        // The one thing that cannot wait for a gap: a decoder rebuilt while
+        // the page was hidden (iOS takes it back, see _onDecoderError) needs a
+        // keyframe, and the request it made then went out from a page about to
+        // freeze. Without this one the picture came back on the transport's
+        // own starvation requests: 5.7 s after the page, 11 s in all, on an
+        // iPhone (11/11). Main-thread decode only: the worker keeps its own.
+        if (!this._videoWorker && !this._referenceValid)
+            this._requestIdr('back from the background');
+        // The next spell in the background forgives its own lost decoder.
+        this._hiddenLossForgiven = false;
         // What the detection measured before is of another page: start over.
         if (this._stepper) this._stepper.linkChanged('back from the background', performance.now());
     }
@@ -6309,11 +6415,15 @@ export class StreamView {
     // rotation reports two or three intermediate sizes on its way.
     _startScreenWatch() {
         if (this._offScreenChange) return;
-        this._screenSizeSeen = devicePixelSize();
+        const readSize = () =>
+            this._streamAspect === 'window'
+                ? windowPixelSize() || devicePixelSize()
+                : devicePixelSize();
+        this._screenSizeSeen = readSize();
         let timer = null;
         const check = () => {
             timer = null;
-            const now = devicePixelSize();
+            const now = readSize();
             const seen = this._screenSizeSeen;
             if (!now || (seen && now.width === seen.width && now.height === seen.height)) return;
             this._screenSizeSeen = now;
@@ -6631,9 +6741,29 @@ export class StreamView {
         return streamVolume.outputLevel() === 0;
     }
 
+    get muteInBackground() {
+        return this._muteInBackground;
+    }
+
+    set muteInBackground(enabled) {
+        const next = enabled === true;
+        if (this._muteInBackground === next) return;
+        this._muteInBackground = next;
+        this._applyVolume();
+    }
+
+    _setWindowActive(active) {
+        if (this._isWindowActive === active) return;
+        this._isWindowActive = active;
+        if (this._muteInBackground) {
+            this._applyVolume();
+        }
+    }
+
     /** Send the stream volume to whatever plays this view's audio, and redraw the control. */
     _applyVolume() {
-        const out = streamVolume.outputLevel();
+        const bgMuted = this._muteInBackground && !this._isWindowActive;
+        const out = bgMuted ? 0 : streamVolume.outputLevel();
         if (this.audioEl) this.audioEl.volume = out;
         if (this.audioPipeline) this.audioPipeline.setVolume(out);
         // A phone or a tablet has no control to redraw, but the shortcut
@@ -6909,7 +7039,7 @@ export class StreamView {
             t('stream.statResolution') +
             '</span>' +
             '<span class="stats-value">' +
-            (this._resolution || '?') +
+            this._resolutionStat() +
             '</span>' +
             '</div>';
         html += this._autoCeilingRow();
@@ -7711,6 +7841,56 @@ export class StreamView {
         }
         this._applyDecodeRateGovernor(diag, fps, now);
         this._tickAutoCeiling(diag, now);
+        this._tickAv1Watch(diag, now);
+    }
+
+    /**
+     * An 8-bit AV1 that does not keep up raises no error (util/CodecAuto.js,
+     * Av1Watch): the decoder's queue says so, or the host asked for fewer
+     * pictures. Under Auto it is a failure: the stream comes back in H.264 at
+     * once, the way an HEVC that fails does, and the next launches ask H.264.
+     * A stream whose moving pictures ran smoothly is remembered, whoever
+     * chose AV1. Not an HDR or a 4:4:4 AV1, which are other decoders.
+     * @param {{decodeQueueAvg?: number, arrivalAvgMs?: number}|null} diag
+     * @param {number} now
+     */
+    _tickAv1Watch(diag, now) {
+        if (this._av1Watch === null) return;
+        if (this._av1Watch === undefined) {
+            const plainAv1 =
+                String(this.videoCodec).toLowerCase() === 'av1' &&
+                !this._hdrEnabled &&
+                !this._yuv444;
+            this._av1Watch = plainAv1 ? new Av1Watch() : null;
+            if (!plainAv1) return;
+        }
+        if (!diag) return;
+        const verdict = this._av1Watch.sample(
+            {
+                queue: diag.decodeQueueAvg || 0,
+                fps: diag.arrivalAvgMs > 0 ? 1000 / diag.arrivalAvgMs : 0,
+                capped: this._decodeRateCap > 0,
+            },
+            now,
+        );
+        if (!verdict) return;
+        this._av1Watch = null;
+        if (verdict === 'proven') {
+            noteAv1Proven();
+            console.log('[MW] AV1 ran smoothly here for two minutes — remembered');
+        } else if (this._codecAuto) {
+            // Kept whatever follows: H.264 from the next launch on.
+            noteAv1Failed();
+            // And this stream back in H.264 now (Bruno, 11/11/2026): left to
+            // run, it only falls further behind. A guest stays where it is:
+            // the feed is the owner's.
+            const relaunch = !this._playerMode;
+            console.warn(
+                '[MW] Auto: AV1 does not keep up in this browser — ' +
+                    (relaunch ? 'back in H.264' : 'H.264 from the next launch on'),
+            );
+            if (relaunch) this._requestCodecFallback();
+        }
     }
 
     /**
@@ -7737,6 +7917,18 @@ export class StreamView {
             fpsCap: this._decodeRateCap,
             presentsFps: this._hostPresentsFps,
         });
+    }
+
+    /** The stats card's resolution: the decoded frame's size, "host limit"
+     *  beside it when the native host's own screen is what capped it. */
+    _resolutionStat() {
+        const size = this._resolution || '?';
+        const m = /^(\d+)[×x](\d+)/.exec(this._resolution || '');
+        const frame = m ? { width: +m[1], height: +m[2] } : null;
+        const hs = this._hostScreen;
+        return hs && hostScreenCaps(hs.asked, hs.display, frame)
+            ? t('stream.statResolutionHostLimit', { size })
+            : size;
     }
 
     /** The stats card's line on what Auto learned from this host; '' when it
@@ -7957,6 +8149,21 @@ export class StreamView {
         }
     }
 
+    /** The pad-number notice, made the first time the host speaks of it. */
+    _padNumberNotice() {
+        if (!this._padNumber) {
+            this._padNumber = new PadNumberNotice({
+                hosts: () => BackendClient.getHosts(),
+                stopSession: (uuid) => BackendClient.stopHostSession(uuid),
+                replug: () => this._gamepadManager && this._gamepadManager.replugAll(),
+                warn: (text, options) => Toast.warning(text, options),
+                error: (text) => Toast.error(text),
+                t,
+            });
+        }
+        return this._padNumber;
+    }
+
     // ── Stats message handler (ping/pong + periodic backend stats) ─────────
 
     _handleStatsMessage(msg) {
@@ -7972,6 +8179,13 @@ export class StreamView {
         }
         if (msg.type === 'rumble') {
             if (this._gamepadManager) this._gamepadManager.rumble(msg.index, msg.low, msg.high);
+            return;
+        }
+        if (msg.type === 'padnumber') {
+            // Native Windows host: a pad another session left plugged in took
+            // player 1 (stream/HostPadNumber.js). The owner's to settle: a
+            // guest cannot close the host's sessions.
+            if (this._nativeHost && !this._playerMode) this._padNumberNotice().note(msg);
             return;
         }
         if (msg.type === 'inputgate') {
@@ -8003,6 +8217,8 @@ export class StreamView {
                         frameSize: this._frameSize,
                     });
             }
+            if (this._hostScreen && msg.displayWidth > 0 && msg.displayHeight > 0)
+                this._hostScreen.display = { width: msg.displayWidth, height: msg.displayHeight };
             if (this.onHostDisplayFormat) this.onHostDisplayFormat(msg);
             return;
         }
@@ -8788,6 +9004,8 @@ export class StreamView {
                     if (result.supported) {
                         try {
                             this.decoder.configure(cfg);
+                            // Applied again after a queue flush (_flushDecodeQueue).
+                            this._activeDecoderCfg = cfg;
                             this.decoderConfigured = true;
                             this.decoderConfiguring = false;
                             console.log(
@@ -8855,6 +9073,53 @@ export class StreamView {
             return;
         }
 
+        // The brakes H.264 and HEVC have in decodeFrame, which AV1 had none
+        // of: a decoder too slow for the stream was fed every picture, and a
+        // thousand were waiting after 50 s (stream/DecodeBrake.js). Deltas
+        // wait for a keyframe while the reference is lost, as there.
+        if (!isKeyframe && !this._referenceValid) {
+            this.stats.dropped++;
+            this._diag.noteDrop('backpressure');
+            // Retry while waiting — the original request may have been lost.
+            this._requestIdr('reference invalid');
+            return;
+        }
+
+        // The decoder's queue, as the other codecs and the worker report it:
+        // without it the overlay read an empty queue under an AV1 that had a
+        // thousand pictures waiting, and nothing that watches the queue (the
+        // enhancer's ladder, the decode-rate governor, Av1Watch) saw it.
+        this._diag.noteDecodeQueue(this.decoder.decodeQueueSize);
+
+        const brake = queueBrake({
+            isKeyframe,
+            queued: this.decoder.decodeQueueSize,
+            queueMax: this.DECODE_QUEUE_MAX,
+            stallStart: this._queueStallStart,
+            now: performance.now(),
+            stallMs: this.QUEUE_STALL_MS,
+            resetMs: this.QUEUE_RESET_MS,
+        });
+        this._queueStallStart = brake.stallStart;
+        if (brake.verdict === 'reset') {
+            console.warn(
+                '[StreamView] AV1 decode queue stalled >' +
+                    this.QUEUE_RESET_MS +
+                    'ms (queueSize=' +
+                    this.decoder.decodeQueueSize +
+                    ') — resetting decoder',
+            );
+            this._handleDecoderError(new Error('Decode queue stalled'));
+            return;
+        }
+        if (brake.verdict === 'drop') {
+            this.stats.dropped++;
+            this._diag.noteDrop('backpressure');
+            this._referenceValid = false;
+            this._requestIdr('decode queue overflow');
+            return;
+        }
+
         const timestamp = this.frameCount * 16667;
         this.frameCount++;
 
@@ -8864,6 +9129,21 @@ export class StreamView {
         // Delimiter and Padding OBUs must be stripped: the WebCodecs sample
         // format forbids them and Safari/VideoToolbox rejects the frame.
         const obuData = stripNonEssentialObus(data);
+
+        // A keyframe behind a saturated queue recovers nothing: flush the
+        // stale pictures in front of it, when they are worth it (see
+        // decodeFrame and DecodeQueuePolicy).
+        if (
+            isKeyframe &&
+            shouldFlushAtKeyframe({
+                queued: this.decoder.decodeQueueSize,
+                arrivalMs: this._diag.arrivalAvgMs,
+                sinceLastFlushMs: performance.now() - this._lastQueueFlushMs,
+            })
+        ) {
+            this._flushDecodeQueue();
+        }
+
         try {
             const chunk = new EncodedVideoChunk({
                 type: type,
@@ -8890,6 +9170,13 @@ export class StreamView {
             this.decoder.decode(chunk);
             this.stats.received++;
             this._tellDecodeQueue();
+            // Keyframe submitted: the reference is valid again, and the
+            // saturation clock starts over (as in decodeFrame).
+            if (isKeyframe) {
+                this._referenceValid = true;
+                this._idrRequested = false;
+                this._queueStallStart = 0;
+            }
         } catch (err) {
             console.error('[StreamView] decodeAv1Frame() error:', err.message, err);
             this.stats.dropped++;
@@ -8948,7 +9235,7 @@ export class StreamView {
             `[StreamView] Mouse: ${this._gamingMode ? 'gaming' : 'desktop'} mode,` +
                 ` pointer lock ${typeof this.inputEl?.requestPointerLock === 'function' ? 'offered' : 'absent'}` +
                 ` by this browser${IS_IOS ? ' (iOS/iPadOS' + (navigator.standalone ? ', home-screen app)' : ')') : ''}` +
-                (this._lockFreeLook ? ', lock-free look on (lab key)' : ''),
+                (this._lockFreeLook ? ', lock-free look on once the lock is refused' : ''),
         );
 
         // Mode-specific events
@@ -9108,7 +9395,7 @@ export class StreamView {
                 this._sendRelativeMouse(e.movementX, e.movementY);
                 this._noteMouseSent(e);
             } else if (this._pointerLockRefused && this._lockFreeLook) {
-                // Lab key mw_lookfree: no lock to be had, so the browser's own
+                // Lock-free look (iOS, or key mw_lookfree): no lock to be had, so the browser's own
                 // motion goes out relative — the game turns as long as the
                 // browser reports movement, edge or not. The host's cursor no
                 // longer follows the local one: a look mode, not for menus.
@@ -9150,9 +9437,13 @@ export class StreamView {
         // Click to capture focus: set host cursor at clicked position, then grab pointer.
         this._onGamingClick = (e) => {
             if (this._mouseFocused) return; // Already focused — click handled by mousedown/mouseup
-            // Refused already: the click went out as a click (mousedown/up),
-            // and asking again would only be refused again.
-            if (this._pointerLockRefused) return;
+            // Refused already: the click went out as a click (mousedown/up).
+            // On iOS asking again would only be refused again; elsewhere the
+            // refusal may have been a moment's, so this click asks once more.
+            if (this._pointerLockRefused) {
+                if (!this._lockRefusalFinal) this._lockPointerOnClick();
+                return;
+            }
             e.preventDefault();
 
             // Send absolute position so the host cursor teleports to the clicked point
@@ -10210,7 +10501,10 @@ export class StreamView {
         if (this.hintEl) this.hintEl.style.display = 'none';
         if (!StreamView._lockRefusedToastShown) {
             StreamView._lockRefusedToastShown = true;
-            Toast.info(t('stream.pointerLockRefused'), { durationMs: 8000 });
+            const text = this._lockFreeLook
+                ? 'stream.pointerLockRefusedLookFree'
+                : 'stream.pointerLockRefused';
+            Toast.info(t(text), { durationMs: 8000 });
         }
     }
 

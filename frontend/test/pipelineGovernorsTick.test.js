@@ -27,6 +27,7 @@ function view(over = {}) {
         _applyEnhancerGovernor: vi.fn(),
         _applyDecodeRateGovernor: vi.fn(),
         _tickAutoCeiling: vi.fn(),
+        _tickAv1Watch: vi.fn(),
         _decodedFps: P._decodedFps,
         _runPipelineGovernors: P._runPipelineGovernors,
         ...over,
@@ -62,7 +63,7 @@ describe('StreamView — the governors on the tick', () => {
         }
     });
 
-    it('feeds the meter of Auto\'s ceiling what the pipeline saw', () => {
+    it("feeds the meter of Auto's ceiling what the pipeline saw", () => {
         const tick = vi.fn();
         const v = {
             autoCeilingMeter: {
@@ -109,8 +110,14 @@ describe('StreamView — the governors on the tick', () => {
         expect(sample({}).neutral).toBe(false);
         expect(sample({ hasActiveShare: () => true }).neutral).toBe(true);
         expect(sample({ autoCeilingIdle: () => true }).neutral).toBe(true);
-        expect(sample({ _stepper: { stepFps: 240 } })).toMatchObject({ neutral: false, stepped: true });
-        expect(sample({ _stepper: { stepFps: 0 } })).toMatchObject({ neutral: false, stepped: false });
+        expect(sample({ _stepper: { stepFps: 240 } })).toMatchObject({
+            neutral: false,
+            stepped: true,
+        });
+        expect(sample({ _stepper: { stepFps: 0 } })).toMatchObject({
+            neutral: false,
+            stepped: false,
+        });
     });
 
     it('tells that meter of a step down of the enhancer, not of a step up', () => {

@@ -20,6 +20,7 @@
 #include "server/AppSettings.h"
 #include "server/AuthManager.h"
 #include "server/PhonePairing.h"
+#include "server/RequestGuard.h"
 #include "server/RestRouter.h"
 #include "server/SessionCookie.h"
 #include "common/Logger.h"
@@ -64,16 +65,119 @@ struct Context
     PhonePairing book;
 };
 
-/// The administrator alone answers a device, with the right that mints a PIN
-/// (HttpRequest::isLocal: this machine, a host-key session, or a session that
-/// unlocked the admin password). Anyone else is turned away before the request
-/// is looked at: a session with 403, a caller with none with 401, counted.
-std::optional<HttpResponse> refuseAllButAdmin(Context& c, const HttpRequest& req)
+/// Whether @p address sits on one of this host's own links: inside the prefix of
+/// one of its interfaces, an IPv6 address inside that interface's /64. An IPv4
+/// address counts only when private or link-local; a public IPv6 address counts
+/// on a line only, where ICE found it.
+bool onThisHostsLink(const Context& c, const QString& address, bool line)
 {
-    if (req.isLocal) return std::nullopt;
-    if (c.auth.validateSession(c.deps.sessionToken(req))) return refusal(403, "not_allowed");
+    QHostAddress a(AuthManager::cleanClientAddress(address));
+    bool mapped = false;
+    const quint32 v4 = a.toIPv4Address(&mapped);
+    if (mapped) a = QHostAddress(v4);
+    if (a.isNull() || a.isLoopback() || !c.deps.localSubnets) return false;
+    const bool v6 = a.protocol() == QAbstractSocket::IPv6Protocol;
+    if (!v6 && !AuthManager::isLanAddress(a.toString())) return false;
+    if (v6 && !line && !a.isLinkLocal() && !a.isUniqueLocalUnicast()) return false;
+    const QList<QPair<QHostAddress, int>> subnets = c.deps.localSubnets();
+    for (const auto& net : subnets) {
+        if (net.first.protocol() != a.protocol()) continue;
+        if (a.isInSubnet(net.first, v6 ? 64 : net.second)) return true;
+    }
+    return false;
+}
+
+/// Whether a socket request names this host by a local name
+/// (RequestGuard::isLocalHostName): a Host header is required.
+bool underALocalName(const HttpRequest& req)
+{
+    const QString host = req.headers.value(QStringLiteral("host"));
+    return !host.isEmpty() && RequestGuard::isLocalHostName(host);
+}
+
+/// Whether a proxy passed this socket request along, on this machine or another
+/// (RequestGuard::forwardedByProxy, the list every caller shares). Its sender
+/// may stand anywhere.
+bool passedAlong(const HttpRequest& req)
+{
+    return RequestGuard::forwardedByProxy(req.headers);
+}
+
+/// Whether @p address is this machine's own: the loopback, or what
+/// PairRequestDeps::thisMachine says.
+bool isThisMachine(const Context& c, const QString& address)
+{
+    const QString clean = AuthManager::cleanClientAddress(address);
+    if (QHostAddress(clean).isLoopback()) return true;
+    return c.deps.thisMachine && c.deps.thisMachine(clean);
+}
+
+/// The house, where a device asks from and a paired session answers from: this
+/// LAN as AuthManager::fromThisLan judges it, on one of this host's links. On a
+/// line, where ICE found the caller. On a socket, under a local name too
+/// (underALocalName): the public domain is how this host is reached from
+/// anywhere, and only a line says where such a caller stands. A socket request
+/// a proxy passed along (passedAlong) is not the house, and neither is a peer
+/// that is this machine (isThisMachine), on a socket or on a line. Anywhere
+/// else, a private address included, is the internet.
+bool fromThisHousesLink(const Context& c, const HttpRequest& req)
+{
+    if (isThisMachine(c, req.clientAddress)) return false;
+    if (req.viaTunnel) return onThisHostsLink(c, req.clientAddress, true);
+    if (!underALocalName(req) || passedAlong(req)) return false;
+    return AuthManager::fromThisLan(req) &&
+           onThisHostsLink(c, AuthManager::attemptAddress(req.clientAddress, req.headers), false);
+}
+
+/// Who may answer a device's request, and with what reach.
+struct Answerer
+{
+    std::optional<HttpResponse> refused; ///< set: turned away, nothing else is looked at
+    bool admin = false;                  ///< every request; otherwise this LAN's only
+};
+
+/// Who answers a device. The administrator, with the right that mints a PIN
+/// (HttpRequest::isLocal: this machine, a host-key session, or a session that
+/// unlocked the admin password), from anywhere, for every request. And, from
+/// one of this host's links (fromThisHousesLink: ICE's address on a line, the
+/// socket's otherwise, never a header), a paired session that signs its answers
+/// with its own pairing key, for the requests made from this LAN only
+/// (hiddenFromAnswerer):
+/// someone in the house lets in a device of the house. A guest holds a player
+/// cookie, not a session, and --noadmin closes these routes before they run.
+/// Anyone else is turned away before the request is looked at: a session with
+/// 403, a caller with none with 401, counted.
+Answerer answererOf(Context& c, const HttpRequest& req)
+{
+    if (req.isLocal) return {std::nullopt, true};
+    const QString token = c.deps.sessionToken(req);
+    if (c.auth.validateSession(token)) {
+        if (fromThisHousesLink(c, req) && !c.auth.sessionPairingKey(token).isEmpty())
+            return {std::nullopt, false};
+        return {refusal(403, "not_allowed"), false};
+    }
     c.deps.reportAuthFailure(req.clientAddress);
-    return refusal(401, "not_authenticated");
+    return {refusal(401, "not_authenticated"), false};
+}
+
+/// A request made from outside the house (fromThisHousesLink), or from an
+/// address no longer on this host's links, is the administrator's alone: to an
+/// answerer of the house it is answered as any request it may not see.
+bool hiddenFromAnswerer(Context& c, const Answerer& who, const QString& id)
+{
+    if (who.admin) return false;
+    PhonePairing::Request r;
+    if (c.book.find(id, c.deps.now(), &r) != PhonePairing::Lookup::Found) return false;
+    return !r.fromLan || !onThisHostsLink(c, r.address, r.viaTunnel);
+}
+
+/// Whether a session's answer is refused for being temporary: a session kept
+/// without "remember me" may say no, not let a device in. This machine has no
+/// session.
+bool temporaryAnswerer(Context& c, const HttpRequest& req)
+{
+    const QString token = c.deps.sessionToken(req);
+    return c.auth.validateSession(token) && c.auth.sessionForToken(token).ephemeral;
 }
 
 int secondsLeft(const PhonePairing::Request& r, qint64 now)
@@ -97,6 +201,21 @@ QByteArray base64Field(const QJsonObject& body, const char* name)
     return QByteArray::fromBase64(body.value(QLatin1String(name)).toString().toUtf8());
 }
 
+/// The answer's signature, by the key of the session that sends it, when it
+/// has one (the host machine has no session to sign with, and needs none).
+/// Empty when it holds; the refusal otherwise, counted.
+std::optional<HttpResponse> badSignature(Context& c, const HttpRequest& req,
+                                         const QByteArray& message, const QJsonObject& body)
+{
+    const QString token = c.deps.sessionToken(req);
+    const QByteArray signer =
+        c.auth.validateSession(token) ? c.auth.sessionPairingKey(token) : QByteArray();
+    if (signer.isEmpty()) return std::nullopt;
+    if (PairingCrypto::verify(signer, message, base64Field(body, "sig"))) return std::nullopt;
+    c.deps.reportAuthFailure(req.clientAddress);
+    return refusal(403, "bad_signature");
+}
+
 /// Whether the administrator's box lets devices ask from outside this LAN.
 bool boxTicked(const Context& c)
 {
@@ -110,12 +229,12 @@ bool mayAskFromElsewhere(const Context& c, const HttpRequest& req)
     return !req.adminLocked && boxTicked(c);
 }
 
-/// Whether @p req may ask, or claim what it asked: from this LAN always
-/// (AuthManager::fromThisLan), from anywhere while the administrator allows it.
-/// The setting is read only for a caller from elsewhere.
+/// Whether @p req may ask, or claim what it asked: from the house always
+/// (fromThisHousesLink), from anywhere while the administrator allows it. The
+/// setting is read only for a caller from elsewhere.
 bool mayAsk(const Context& c, const HttpRequest& req)
 {
-    return AuthManager::fromThisLan(req) || mayAskFromElsewhere(c, req);
+    return fromThisHousesLink(c, req) || mayAskFromElsewhere(c, req);
 }
 
 /// Requests from elsewhere live only while the box is ticked: unticked, they
@@ -152,9 +271,10 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
 
     // POST /api/auth/pair-request — a device asks to be let in, with no PIN.
     //
-    // From this LAN (AuthManager::fromThisLan), or from anywhere while the
-    // administrator allows it (AppSettings::pairRequestInternet, off by
-    // default); before any session like the PIN, and under the same lockout.
+    // From the house (fromThisHousesLink: this LAN, on this host's links), or
+    // from anywhere while the administrator allows it
+    // (AppSettings::pairRequestInternet, off by default); before any session
+    // like the PIN, and under the same lockout.
     // The body names the device's MW-BIND-v1 key and commits to its nonce. On a
     // line, the line has already proved a key, and the request must be for that
     // one.
@@ -172,7 +292,7 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
         const QString who = AuthManager::attemptAddress(req.clientAddress, req.headers);
         const int locked = c->auth.lockoutSeconds(who);
         if (locked > 0) return lockedOut(locked);
-        const bool fromLan = AuthManager::fromThisLan(req);
+        const bool fromLan = fromThisHousesLink(*c, req);
         if (!fromLan && !mayAskFromElsewhere(*c, req)) return refusal(403, "lan_only");
 
         const QJsonObject body = QJsonDocument::fromJson(req.body).object();
@@ -272,8 +392,8 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
         if (!p.approver.isEmpty()) c->auth.setSessionApprover(token, p.approver);
         c->book.markPaired(id, c->auth.sessionIdForToken(token), now);
         if (c->deps.locate) c->deps.locate(token, req.clientAddress);
-        Logger::info(
-            QStringLiteral("[Pair] '%1' paired, approved by the administrator").arg(p.machineName));
+        Logger::info(QStringLiteral("[Pair] '%1' paired by its QR code, approved on the page")
+                         .arg(p.machineName));
 
         QJsonObject obj;
         obj["state"] = "paired";
@@ -288,7 +408,8 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
     });
 
     // GET /api/auth/pair-request/:id — the request behind a QR code, for the
-    // page to name the device and ask for its code. The administrator's alone.
+    // page to name the device and ask for its code. The administrator's, or a
+    // paired session's on this LAN for a request made from this LAN (answererOf).
     // The code itself is never sent: it is read from the device's screen. Where
     // the request came from is: this LAN or elsewhere, and the address it came
     // from. For a request from elsewhere, also the city of that address, while
@@ -298,9 +419,11 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
     // comes in a later answer once it is known.
     router.get("/api/auth/pair-request/:id", [c](const HttpRequest& req) {
         dropFromElsewhereOnceUnticked(*c);
-        if (auto no = refuseAllButAdmin(*c, req)) return *no;
+        const Answerer who = answererOf(*c, req);
+        if (who.refused) return *who.refused;
         const QString id = req.pathParams.value(QStringLiteral("id"));
         if (!PhonePairing::isRequestId(id)) return refusal(404, "unknown_request");
+        if (hiddenFromAnswerer(*c, who, id)) return refusal(403, "not_allowed");
 
         PhonePairing::Request r;
         const qint64 now = c->deps.now();
@@ -327,30 +450,29 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
         return HttpResponse::json(obj);
     });
 
-    // POST /api/auth/pair-request/:id/approve — the administrator says yes, with
-    // the code typed from the device's screen. A session signs it with its own
-    // pairing key, when it has one: the host machine itself has no session to
-    // sign with, and needs none. The session that approves is the new one's
-    // approver, and takes it along when it is revoked.
+    // POST /api/auth/pair-request/:id/approve — the administrator, or a paired
+    // session on this LAN for a request from this LAN (answererOf), says yes,
+    // with the code typed from the device's screen. A session signs it with its
+    // own pairing key, when it has one: the host machine itself has no session
+    // to sign with, and needs none. A temporary session does not answer yes.
+    // The session that approves is the new one's approver, and takes it along
+    // when it is revoked.
     router.post("/api/auth/pair-request/:id/approve", [c](const HttpRequest& req) {
         dropFromElsewhereOnceUnticked(*c);
-        if (auto no = refuseAllButAdmin(*c, req)) return *no;
+        const Answerer who = answererOf(*c, req);
+        if (who.refused) return *who.refused;
         const QString id = req.pathParams.value(QStringLiteral("id"));
         if (!PhonePairing::isRequestId(id)) return refusal(404, "unknown_request");
+        if (hiddenFromAnswerer(*c, who, id)) return refusal(403, "not_allowed");
+        if (temporaryAnswerer(*c, req)) return refusal(403, "temporary_session");
 
         const QJsonObject body = QJsonDocument::fromJson(req.body).object();
         const QString code = body.value(QStringLiteral("code")).toString();
+        const QString hostId = PairingCrypto::keyId(c->deps.hostKey());
+        if (auto no = badSignature(*c, req, PhonePairing::approveMessage(hostId, id, code), body))
+            return *no;
         const QString token = c->deps.sessionToken(req);
         const bool signedIn = c->auth.validateSession(token);
-        const QByteArray signer = signedIn ? c->auth.sessionPairingKey(token) : QByteArray();
-        if (!signer.isEmpty()) {
-            const QString hostId = PairingCrypto::keyId(c->deps.hostKey());
-            if (!PairingCrypto::verify(signer, PhonePairing::approveMessage(hostId, id, code),
-                                       base64Field(body, "sig"))) {
-                c->deps.reportAuthFailure(req.clientAddress);
-                return refusal(403, "bad_signature");
-            }
-        }
 
         const QString approver = signedIn ? c->auth.sessionIdForToken(token) : QString();
         const PhonePairing::AnswerResult a = c->book.approve(id, code, approver, c->deps.now());
@@ -383,15 +505,22 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
         return HttpResponse::json(obj);
     });
 
-    // POST /api/auth/pair-request/:id/refuse — the administrator says no. The
-    // request is spent at the device's next claim, and the refusal counts
+    // POST /api/auth/pair-request/:id/refuse — the administrator, or a paired
+    // session on this LAN for a request from this LAN, says no, signed as a yes
+    // is. The request is spent at the device's next claim, and the refusal counts
     // against the address it came from like a wrong PIN: a device turned away
     // does not get to ask again and again.
     router.post("/api/auth/pair-request/:id/refuse", [c](const HttpRequest& req) {
         dropFromElsewhereOnceUnticked(*c);
-        if (auto no = refuseAllButAdmin(*c, req)) return *no;
+        const Answerer who = answererOf(*c, req);
+        if (who.refused) return *who.refused;
         const QString id = req.pathParams.value(QStringLiteral("id"));
         if (!PhonePairing::isRequestId(id)) return refusal(404, "unknown_request");
+        if (hiddenFromAnswerer(*c, who, id)) return refusal(403, "not_allowed");
+        const QJsonObject body = QJsonDocument::fromJson(req.body).object();
+        const QString hostId = PairingCrypto::keyId(c->deps.hostKey());
+        if (auto no = badSignature(*c, req, PhonePairing::refuseMessage(hostId, id), body))
+            return *no;
 
         const PhonePairing::AnswerResult a = c->book.refuse(id, c->deps.now());
         switch (a.outcome) {
@@ -404,7 +533,7 @@ void registerPairRequestRoutes(RestRouter& router, AuthManager& authManager, Pai
         case PhonePairing::Answer::Decided: return refusal(409, "decided");
         }
         c->auth.countPairingFailure(a.address);
-        Logger::info(QStringLiteral("[Pair] A device's request refused by the administrator"));
+        Logger::info(QStringLiteral("[Pair] A device's request refused on the page"));
         QJsonObject obj;
         obj["status"] = "ok";
         return HttpResponse::json(obj);

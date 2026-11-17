@@ -97,7 +97,7 @@ From the in‑app overlay: **bitrate** (1–150 Mbps or auto), **resolution** (7
 **FPS** (15–240), **codec** (auto / H.264 / HEVC / AV1 / **PyroWave (Wired LAN only)**, unsupported options greyed out),\
 **HDR**, **4:4:4 chroma**, **Mouse Gaming Mode** (pointer‑lock), perf stats and aspect ratio.
 
-**Settings → Stream audio from** (Windows 11 host, **All applications** by default): **Automatic** streams only the app you are using on the streamed screen, so other apps stay on the host's speakers and out of the stream — and apps on your other screens never reach it. You can also pick one of the apps that have sound: its sound is streamed wherever you are, and comes back when it restarts. Alt‑tab on the streamed screen switches to that app; a click on the taskbar or the desktop changes nothing; when the app closes or crashes the stream goes silent until another one takes focus, never back to the whole mix. The option names the app it follows while a stream runs (*Automatic (app in focus) — huntgame.exe*). Applies at the next stream.
+**Settings → MoonlightWeb Host → Stream audio from** (Windows 11 host, **All applications** by default): **Automatic** streams only the app you are using on the streamed screen, so other apps stay on the host's speakers and out of the stream — and apps on your other screens never reach it. You can also pick one of the apps that have sound: its sound is streamed wherever you are, and comes back when it restarts. Alt‑tab on the streamed screen switches to that app; a click on the taskbar or the desktop changes nothing; when the app closes or crashes the stream goes silent until another one takes focus, never back to the whole mix. The option names the app it follows while a stream runs (*Automatic (app in focus) — huntgame.exe*). Applies at the next stream.
 
 **Settings → Start streams in fullscreen** (off by default) opens every stream in fullscreen. On an iPhone, Safari keeps its bars and the stream fills the page; added to the Home Screen, MoonlightWeb is fullscreen anyway.
 
@@ -127,7 +127,7 @@ Standard pads just work. Others are recognized from [SDL_GameControllerDB](https
 | Radiomaster TX12 (EdgeTX) | USB Joystick (HID) | ✅ recognized on plug-in, like any EdgeTX/OpenTX radio |
 | Logitech G923 for Xbox One and PC | USB, with G HUB on the client | ✅ recognized on plug-in |
 
-**Wheels and radios as themselves** (Chrome or Edge on a computer, MoonlightWeb native host): in **Settings → Controllers**, switch **As itself** on the wheel's or radio's row (the browser asks for the device the first time), or accept the offer when a stream starts. The game then sees the real wheel or radio instead of an Xbox pad: every axis, clutch included, and all 8 channels of a TX12. Force feedback works on Windows and Linux hosts, tested with the G923 in ACC; wheels that speak USB PID (Moza, Simucube, Fanatec…) are supported but not tried yet. An invited player gets it only when you tick **Wheel / Radio** on their sharing row. A Linux host needs nothing more. On a Windows host (x64), the installer sets up the **MoonlightWeb Virtual HID** driver: no test mode, Secure Boot stays on ([details](docs/wiki/04-Frontend.md#49-wheels-and-radios-as-themselves)). A Mac host cannot. Where the host cannot, the switch says why and what to do. On a Windows host, a game left running keeps the wheel and its force feedback when you stop the stream and start a new one within 10 minutes. With Medal on the host, start Medal before the game: started after it, Medal leaves the game without force feedback until it restarts ([details](docs/wiki/04-Frontend.md#49-wheels-and-radios-as-themselves)).
+**Wheels and radios as themselves** (Chrome or Edge on a computer, MoonlightWeb native host): in **Settings → Controllers**, switch **As itself** on the wheel's or radio's row (the browser asks for the device the first time), or accept the offer when a stream starts. The game then sees the real wheel or radio instead of an Xbox pad: every axis, clutch included, and all 8 channels of a TX12. Force feedback works on Windows and Linux hosts, tested with the G923 in ACC; wheels that speak USB PID (Moza, Simucube, Fanatec…) are supported from a Mac or Linux client (not from Windows), but not tried yet. An invited player gets it only when you tick **Wheel / Radio** on their sharing row. A Linux host needs nothing more. On a Windows host (x64), the installer sets up the **MoonlightWeb Virtual HID** driver: no test mode, Secure Boot stays on ([details](docs/wiki/04-Frontend.md#49-wheels-and-radios-as-themselves)). A Mac host cannot. Where the host cannot, the switch says why and what to do. On a Windows host, a game left running keeps the wheel and its force feedback when you stop the stream and start a new one within 10 minutes. With Medal on the host, start Medal before the game: started after it, Medal leaves the game without force feedback until it restarts ([details](docs/wiki/04-Frontend.md#49-wheels-and-radios-as-themselves)).
 
 **No controller in hand?** On a touch screen, the stream has an **on‑screen controller**: the game sees an Xbox pad like any other, with sticks that land under your thumbs. On a phone with no pad connected, it is plugged in from the start, so the game already sees a controller, and comes on screen at the first press; it gives way when a real one appears. The controller button in the stream's header or a 4‑finger tap shows or hides it, and so does its middle button; a long press unplugs it. Size, opacity, vibration and what a finger does outside the controls are in **Settings → On‑screen controller**. An invited player with the gamepad right picks it in their controller dialog ([details](docs/wiki/04-Frontend.md#on-screen-controller)).
 
@@ -227,6 +227,10 @@ Sunshine is no longer installed (since September 2026); an existing Sunshine is 
 
 **Updates:** rerun the installer or use the in‑app button (no UAC prompt); settings and pairings are kept.\
 **Service (optional):** `backend/packaging/windows/install-service.bat` installs a session‑0 service via NSSM.
+
+#### Remote Desktop
+
+Closing a Remote Desktop window leaves your Windows session running **with no screen at all**, not even a virtual one, so the PC's card has nothing to stream until you sign in on the PC again. To keep the screen, leave Remote Desktop another way: instead of closing the window, run `tscon %SESSIONNAME% /dest:console` from an administrator Command Prompt inside the session. The session returns to the PC's screen **unlocked**: lock it right away from the stream (Windows key + L).
 
 ### macOS (Apple Silicon)
 
@@ -376,7 +380,7 @@ The browser loads a few kilobytes of entry page, opens WebRTC straight to your m
 
 </div>
 
-**Possible limitations:** UPnP disabled (forward the media ports 48550‑48573 manually), CGNAT/double‑NAT (detected and reported — port forwarding won't work), or a port already mapped by another device.
+**Possible limitations:** UPnP disabled (forward the media ports 48550‑48573 manually, or the range following `media_base_port`), CGNAT/double‑NAT (detected and reported — port forwarding won't work), or a port already mapped by another device.
 
 ---
 
@@ -432,7 +436,7 @@ Most settings live in the UI and are stored **server‑side** in `settings.json`
 | **macOS** | `~/Library/Application Support/MoonlightWeb/MoonlightWeb/settings.json` |
 | **Linux** | `~/.local/share/MoonlightWeb/MoonlightWeb/settings.json` |
 
-Notable keys not exposed in the UI: `domain` (custom FQDN), `cert_pem` / `cert_key` (your own cert, path or env‑var name), `audio_time_stretch`, `latency_flag_enabled`, `keyboard_layout_fidelity`, `keyboard_debug`, `http_port` / `https_port`, `stun_server`, `update_relay_enabled`, `session_metrics_enabled`, `session_location_enabled`, `metrics_consent`, `native_host_enabled`, `share_guests_admin_windows`, `share_in_booth_mode`, and the administrator's ceilings `max_allowed_frame_rate`, `max_allowed_bitrate` (Mbps) and `max_allowed_stream_resolution` (`"1920x1080"`), which no viewer's Settings can go above (`0` = none; also `moonlightweb --max-allowed-frame-rate 60` and its siblings).\
+Notable keys not exposed in the UI: `domain` (custom FQDN), `cert_pem` / `cert_key` (your own cert, path or env‑var name), `audio_time_stretch`, `latency_flag_enabled`, `keyboard_layout_fidelity`, `keyboard_debug`, `media_base_port`, `http_port` / `https_port`, `stun_server`, `update_relay_enabled`, `session_metrics_enabled`, `session_location_enabled`, `metrics_consent`, `native_host_enabled`, `share_guests_admin_windows`, `share_in_booth_mode`, and the administrator's ceilings `max_allowed_frame_rate`, `max_allowed_bitrate` (Mbps) and `max_allowed_stream_resolution` (`"1920x1080"`), which no viewer's Settings can go above (`0` = none; also `moonlightweb --max-allowed-frame-rate 60` and its siblings).\
 Restart the server after a manual edit. Every key is described in the [settings reference](docs/wiki/07-Settings-Reference.md).
 
 `keyboard_layout_fidelity` (default `"auto"`) decides when the host types the character **your** layout produced rather than the key's position. `"auto"` types your characters in the desktop mouse mode (`azerty` on an AZERTY board shows `azerty` on a QWERTY host) and plays gaming mode by key positions, so movement keys and weapon slots stay put; `"always"` keeps your characters in games too; `"never"` sends positions everywhere, as Moonlight does. Every key stays a real key press. The **MoonlightWeb host** corrects every key, AltGr and a Mac's Option layer included; a **Sunshine Windows host** corrects letters; Sunshine macOS, Linux and Wolf hosts stay positional. A shortcut keeps its letter (Ctrl+A is the host's A) and sends any other key by position (Ctrl+1 stays Ctrl+1), as the numeric keypad always does. A `true` or `false` from 0.4.0 becomes `"always"` or `"auto"`.
@@ -440,6 +444,8 @@ Restart the server after a manual edit. Every key is described in the [settings 
 `keyboard_debug` (default `false`, add it by hand) logs how each printable key was resolved, with two verdicts: **Notepad** (the character typed) and **Game** (the physical key). The log then holds what you type, so nothing is written while the lock screen or a UAC prompt has the keyboard. Remove it once the diagnosis is done.
 
 `native_host_enabled` (default `true`) shows this machine as a host. Set it to `false` to use MoonlightWeb only as a front end for Sunshine, Wolf or your own rig; the engine stays installed.
+
+`media_base_port` (default `48550`) moves the stream media ports (one per slot, `media_base_port` + slot) — e.g. `3480` for a network that only lets 3478-3481 through; the router hole (UPnP) uses the same port; restart after editing; open/forward the same UDP+TCP range yourself if not using UPnP.
 
 #### Update check & version counts
 
@@ -479,6 +485,23 @@ On the LAN the server uses a **self‑signed** certificate. For a real name and 
 
 The cert's **CN must match** `domain`. It is **not** auto‑renewed.\
 Point your DNS (`A`/`CNAME`) to your IP and **forward TCP 443** to this machine yourself.
+
+### Behind a reverse proxy
+
+If another web server answers for your name (the `domain` above) and hands the requests to MoonlightWeb, have it keep the original `Host`, pass the visitor's address on, and let WebSocket connections through. With **nginx**:
+
+```nginx
+location / {
+    proxy_pass https://127.0.0.1:8443;          # the port MoonlightWeb listens on
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+With **Apache**, keep `ProxyPreserveHost On` (it adds `X-Forwarded-For` by itself) and add `upgrade=websocket` to the `ProxyPass` line. **Caddy**'s `reverse_proxy` keeps the `Host` and adds `X-Forwarded-For` by itself, so it needs no extra line.
 
 ---
 

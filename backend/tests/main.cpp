@@ -38,8 +38,11 @@ void run_rendezvous_line_tests();
 void run_address_race_tests();
 void run_relay_start_tests();
 void run_wolf_seat_pairing_tests();
+void run_pairing_chain_tests();
 void run_nv_pairing_signature_tests();
 void run_backend_probe_tests();
+void run_close_when_done_nam_tests();
+void run_viewer_notices_tests();
 void run_host_os_probe_tests();
 void run_send_backlog_tests();
 void run_relay_frame_log_tests();
@@ -65,6 +68,7 @@ void run_stream_ends_tests();
 void run_host_lag_tracker_tests();
 void run_tunnel_frame_tests();
 void run_tunnel_peer_policy_tests();
+void run_tunnel_diag_tests();
 void run_app_manifest_tests();
 void run_wolf_coop_tests();
 void run_start_choice_tests();
@@ -79,6 +83,7 @@ void run_hid_parked_json_tests();
 void run_keyboard_layout_tests();
 void run_native_capabilities_json_tests();
 void run_edition_tests();
+void run_remote_desktop_return_tests();
 void run_mdns_advertiser_tests();
 void run_router_port_core_tests();
 void run_logger_rotation_tests();
@@ -90,6 +95,9 @@ void run_mic_uplink_tests();
 void run_phone_pairing_tests();
 void run_pair_request_routes_tests();
 void run_auth_status_route_tests();
+void run_host_key_route_tests();
+void run_local_channel_tests();
+void run_host_key_vault_tests();
 
 int main(int argc, char** argv)
 {
@@ -124,8 +132,11 @@ int main(int argc, char** argv)
     run_address_race_tests();
     run_relay_start_tests();
     run_wolf_seat_pairing_tests();
+    run_pairing_chain_tests();
     run_nv_pairing_signature_tests();
     run_backend_probe_tests();
+    run_close_when_done_nam_tests();
+    run_viewer_notices_tests();
     run_host_os_probe_tests();
     run_send_backlog_tests();
     run_relay_frame_log_tests();
@@ -151,6 +162,7 @@ int main(int argc, char** argv)
     run_host_lag_tracker_tests();
     run_tunnel_frame_tests();
     run_tunnel_peer_policy_tests();
+    run_tunnel_diag_tests();
     run_app_manifest_tests();
     run_wolf_coop_tests();
     run_start_choice_tests();
@@ -165,6 +177,7 @@ int main(int argc, char** argv)
     run_keyboard_layout_tests();
     run_native_capabilities_json_tests();
     run_edition_tests();
+    run_remote_desktop_return_tests();
     run_mdns_advertiser_tests();
     run_router_port_core_tests();
     run_control_channel_tests();
@@ -175,6 +188,9 @@ int main(int argc, char** argv)
     run_phone_pairing_tests();
     run_pair_request_routes_tests();
     run_auth_status_route_tests();
+    run_host_key_route_tests();
+    run_local_channel_tests();
+    run_host_key_vault_tests();
     // Last: it repoints the Logger singleton at its own temp files.
     run_logger_rotation_tests();
 

@@ -242,6 +242,9 @@ endif()
 mw_apply_patch("${MW_LIBJUICE_DIR}" libjuice-ice-tcp-passive.patch)
 mw_apply_patch("${CMAKE_CURRENT_SOURCE_DIR}/third_party/libdatachannel"
                libdatachannel-ice-tcp-passive.patch)
+# A datagram longer than libjuice's read buffer: Windows reports it as an error,
+# other systems cut it short. With this one libjuice drops it there too.
+mw_apply_patch("${MW_LIBJUICE_DIR}" libjuice-udp-long-datagram.patch)
 
 # libdatachannel (WebRTC DataChannel + media). Match the previous .bat flags.
 set(NO_WEBSOCKET ON  CACHE BOOL "" FORCE)
@@ -297,8 +300,10 @@ add_executable(mw-server
     src/server/AudioApps.cpp
     src/server/Provisioning.cpp
     src/server/ConnectionGuard.cpp
+    src/server/HostKeyVault.cpp
     src/server/HttpServer.cpp
     src/server/ControlChannel.cpp
+    src/server/LocalChannel.cpp
     src/server/ControlTunnel.cpp
     src/server/HttpParser.cpp
     src/server/RequestGuard.cpp
@@ -311,6 +316,7 @@ add_executable(mw-server
     src/server/SessionPool.cpp
     src/server/routes/AuthRoutes.cpp
     src/server/routes/AuthStatusRoute.cpp
+    src/server/routes/HostKeyRoute.cpp
     src/server/routes/PinProofRoutes.cpp
     src/server/routes/HostRoutes.cpp
     src/server/routes/HostAppRoutes.cpp
@@ -350,6 +356,7 @@ add_executable(mw-server
     src/network/UpdateApplyRules.cpp
     src/network/MdnsAdvertiser.cpp
     src/TrayManager.cpp
+    src/ViewerNotices.cpp
     src/Autostart.cpp
     src/DisplaySleep.cpp
     src/LatencyFlag.cpp
@@ -421,6 +428,8 @@ add_executable(mw-server
     src/streaming/StreamWorkerHost.cpp
     src/streaming/ConsoleSession.cpp
     src/streaming/WorkerService.cpp
+    src/streaming/RemoteDesktopReturn.cpp
+    src/streaming/RemoteDesktopReturnPolicy.cpp
     src/streaming/worker/StreamWorkerMain.cpp
     src/streaming/worker/CoopSessionResolver.cpp
 )
