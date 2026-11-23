@@ -210,12 +210,11 @@ void VirtualDisplayJob::activateAs(VirtualDisplay::Asker asker, int width, int h
         // On already — and, when a size or a rate was asked for, on in that
         // mode, and with the requested exclusive state satisfied (including the
         // initial markers on disk if a previous lock screen delayed them).
-        const bool exclusiveReady = !wantExclusive ||
-                                    (m_ActiveExclusive &&
-                                     QFile::exists(VirtualDisplay::othersOffPath()) &&
-                                     QFile::exists(VirtualDisplay::exclusiveWantedPath()));
+        const bool hasOff = QFile::exists(VirtualDisplay::othersOffPath());
+        const bool hasWanted = QFile::exists(VirtualDisplay::exclusiveWantedPath());
+        const bool exclusiveOk = !wantExclusive || (m_ActiveExclusive && hasOff && hasWanted);
         if (st.active && (width == 0 || (width == m_ActiveWidth && height == m_ActiveHeight)) &&
-            (refresh == 0 || refresh == m_ActiveRefresh) && hdr == m_ActiveHdr && exclusiveReady) {
+            (refresh == 0 || refresh == m_ActiveRefresh) && hdr == m_ActiveHdr && exclusiveOk) {
             if (cb) cb(true, QString());
             return;
         }

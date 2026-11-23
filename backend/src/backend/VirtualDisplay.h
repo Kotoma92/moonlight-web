@@ -551,9 +551,8 @@ struct ExclusiveWanted
 
     bool operator==(const ExclusiveWanted& o) const
     {
-        return width == o.width && height == o.height &&
-               refreshMilliHz == o.refreshMilliHz && benchSecondary == o.benchSecondary &&
-               modePending == o.modePending;
+        return width == o.width && height == o.height && refreshMilliHz == o.refreshMilliHz &&
+               benchSecondary == o.benchSecondary && modePending == o.modePending;
     }
 };
 
@@ -563,8 +562,7 @@ QByteArray toJson(const ExclusiveWanted& wanted);
 
 /// True when our virtual display is among @p activeDevicePaths AND at least one
 /// other active display path exists beside it.
-bool hasOtherActiveDisplays(const QStringList& activeDevicePaths,
-                            const QString& ourDevicePath);
+bool hasOtherActiveDisplays(const QStringList& activeDevicePaths, const QString& ourDevicePath);
 
 /// True while the Windows guard should enforce exclusive display state: the
 /// server is still alive, an exclusive stream wants other screens off, and

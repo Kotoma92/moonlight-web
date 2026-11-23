@@ -1329,10 +1329,8 @@ struct ExclusiveLock
 
     explicit ExclusiveLock(DWORD waitMs = 5000)
     {
-        const std::wstring name =
-            (QStringLiteral("Local\\") + VirtualDisplay::displayName() +
-             QStringLiteral(" exclusive-op"))
-                .toStdWString();
+        const auto m = QStringLiteral("Local\\%1 exclusive-op").arg(VirtualDisplay::displayName());
+        const std::wstring name = m.toStdWString();
         mutex = CreateMutexW(nullptr, FALSE, name.c_str());
         if (mutex) {
             const DWORD w = WaitForSingleObject(mutex, waitMs);
@@ -1704,13 +1702,13 @@ int stageMode(Context& ctx)
             setOthersOff(ctx, true);
             const int n = keepOnlyOurs(target->devicePath, &error);
             off = VirtualDisplay::othersOffAfter(LayoutStep::Exclusive, off, n >= 0);
-            if (n >= 0)
+            if (n >= 0) {
                 Logger::info(
                     QStringLiteral("[vdisplay-apply] exclusive: %1 other display(s) off").arg(n));
-            else
-                Logger::warning(
-                    QStringLiteral("[vdisplay-apply] exclusive: the others stay on: %1")
-                        .arg(error));
+            } else {
+                const auto msg = QStringLiteral("[vdisplay-apply] others stay on: %1").arg(error);
+                Logger::warning(msg);
+            }
             if (!off) setOthersOff(ctx, false);
         } else {
             Logger::info(QStringLiteral(
@@ -1743,8 +1741,7 @@ LRESULT CALLBACK guardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if (msg == WM_NCCREATE) {
         const auto* cs = reinterpret_cast<const CREATESTRUCTW*>(lParam);
         if (cs) {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-                              reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
         }
         return TRUE;
     }
@@ -1785,8 +1782,7 @@ struct GuardWindow
         hwnd = CreateWindowExW(0, MAKEINTATOM(cls), L"", WS_POPUP, -32000, -32000, 1, 1, nullptr,
                                nullptr, inst, &state);
         if (hwnd) {
-            wtsRegistered =
-                WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
+            wtsRegistered = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
         }
     }
 
@@ -2048,9 +2044,9 @@ int guard(const QString& server)
                 !wnd.state.sessionLocked && (pausedUntilMs < 0 || nowMs >= pausedUntilMs);
             if (allowAttempt) {
                 const auto target = findOurTarget();
-                const bool otherActive =
-                    target && VirtualDisplay::hasOtherActiveDisplays(activeDevicePaths(),
-                                                                     target->devicePath);
+                const QString ours = target ? target->devicePath : QString();
+                const QStringList devs = activeDevicePaths();
+                const bool otherActive = VirtualDisplay::hasOtherActiveDisplays(devs, ours);
                 if (VirtualDisplay::shouldGuardEnforce(alive, true, otherActive,
                                                        wanted->modePending)) {
                     bool denied = false;

@@ -4913,8 +4913,7 @@ int main(int argc, char* argv[])
                 AppSettings settings;
                 return VirtualDisplay::ownerWantsOthersOff(
                     settings.virtualDisplayExclusive(), body.contains("others_off"),
-                    body["others_off"].toBool(false),
-                    settings.virtualDisplayExclusiveInherited(),
+                    body["others_off"].toBool(false), settings.virtualDisplayExclusiveInherited(),
                     settings.virtualDisplayExclusiveEnforced());
             }();
             // Its refresh rate, on Windows, is 240 Hz whatever the stream's

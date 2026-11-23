@@ -167,8 +167,7 @@ bool othersGoOff(Asker asker, bool optionOn, bool guestOn, bool othersOff)
     return asker == Asker::Owner && optionOn && (!guestOn || othersOff);
 }
 
-bool ownerWantsOthersOff(bool allowed, bool hasChoice, bool choice, bool inherited,
-                         bool enforced)
+bool ownerWantsOthersOff(bool allowed, bool hasChoice, bool choice, bool inherited, bool enforced)
 {
     if (!allowed) return false;
     return enforced || (hasChoice ? choice : inherited);
