@@ -982,6 +982,27 @@ void run_app_settings_tests()
         CHECK_EQ(e.httpPort(1), quint16(82));
     }
 
+    SECTION("AppSettings: virtualDisplayExclusiveEnforced defaults true and toggles");
+    {
+        const QString dir = tmp.path() + "/vdexcl";
+        QDir().mkpath(dir);
+        AppSettings vd;
+        vd.m_FilePath = dir + "/settings.json";
+        CHECK(!vd.virtualDisplayExclusive());
+        CHECK(vd.virtualDisplayExclusiveEnforced());
+
+        vd.setVirtualDisplayExclusive(true);
+        CHECK(vd.virtualDisplayExclusive());
+        CHECK(vd.virtualDisplayExclusiveEnforced());
+
+        vd.setVirtualDisplayExclusiveEnforced(false);
+        CHECK(!vd.virtualDisplayExclusiveEnforced());
+        CHECK(vd.virtualDisplayExclusive());
+
+        vd.setVirtualDisplayExclusiveEnforced(true);
+        CHECK(vd.virtualDisplayExclusiveEnforced());
+    }
+
     SECTION("AppSettings: a file that is not a settings document is kept aside");
     {
         const QString dir = tmp.path() + "/bad";

@@ -193,6 +193,7 @@ private:
     int m_ActiveHeight = 0;
     int m_ActiveRefresh = 0; ///< millihertz
     bool m_ActiveHdr = false;
+    bool m_ActiveExclusive = false;
     QDateTime m_StartedAt;
     QDateTime m_FinishedAt;
 

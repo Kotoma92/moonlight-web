@@ -192,6 +192,8 @@ void VirtualDisplayJob::activateAs(VirtualDisplay::Asker asker, int width, int h
     VirtualDisplay::normaliseRate(refresh);
     // Already on and seen by the engine: nothing to wait for. (A running
     // operation is asked first — its outcome is what the caller wants.)
+    const bool wantExclusive = VirtualDisplay::othersGoOff(
+        asker, othersOff, m_GuestOn && m_GuestOn(), QFile::exists(VirtualDisplay::othersOffPath()));
     if (!running() && m_Queue.isEmpty()) {
         const VirtualDisplay::Status st = VirtualDisplay::probe();
         if (!st.supported) {
@@ -206,19 +208,18 @@ void VirtualDisplayJob::activateAs(VirtualDisplay::Asker asker, int width, int h
             return;
         }
         // On already — and, when a size or a rate was asked for, on in that
-        // mode. The mode this process last applied is the only one it can
-        // vouch for: after a restart it knows none, and the operation runs
-        // again.
+        // mode, and with the requested exclusive state satisfied (including the
+        // initial markers on disk if a previous lock screen delayed them).
+        const bool hasOff = QFile::exists(VirtualDisplay::othersOffPath());
+        const bool hasWanted = QFile::exists(VirtualDisplay::exclusiveWantedPath());
+        const bool exclusiveOk = !wantExclusive || (m_ActiveExclusive && hasOff && hasWanted);
         if (st.active && (width == 0 || (width == m_ActiveWidth && height == m_ActiveHeight)) &&
-            (refresh == 0 || refresh == m_ActiveRefresh) && hdr == m_ActiveHdr) {
+            (refresh == 0 || refresh == m_ActiveRefresh) && hdr == m_ActiveHdr && exclusiveOk) {
             if (cb) cb(true, QString());
             return;
         }
     }
-    enqueue(Action::Activate, width, height, refresh, hdr,
-            VirtualDisplay::othersGoOff(asker, othersOff, m_GuestOn && m_GuestOn(),
-                                        QFile::exists(VirtualDisplay::othersOffPath())),
-            std::move(cb));
+    enqueue(Action::Activate, width, height, refresh, hdr, wantExclusive, std::move(cb));
 }
 
 void VirtualDisplayJob::activateIfOff(int width, int height, int refreshMilliHz, Callback cb)
@@ -303,13 +304,15 @@ void VirtualDisplayJob::enqueue(Action action, int width, int height, int refres
         m_AskedBeforeFallback ? *m_AskedBeforeFallback : m_Request;
     if (running() && runningAsked.action == action && runningAsked.width == width &&
         runningAsked.height == height && runningAsked.refreshMilliHz == refreshMilliHz &&
-        runningAsked.hdr == hdr && m_Queue.isEmpty()) {
+        runningAsked.hdr == hdr &&
+        (action != Action::Activate || runningAsked.exclusive == exclusive) && m_Queue.isEmpty()) {
         if (cb) m_Callbacks.append(std::move(cb));
         return;
     }
     if (!m_Queue.isEmpty() && m_Queue.last().action == action && m_Queue.last().width == width &&
         m_Queue.last().height == height && m_Queue.last().refreshMilliHz == refreshMilliHz &&
-        m_Queue.last().hdr == hdr) {
+        m_Queue.last().hdr == hdr &&
+        (action != Action::Activate || m_Queue.last().exclusive == exclusive)) {
         if (cb) {
             Callback prev = m_Queue.last().cb;
             m_Queue.last().cb = [prev, cb](bool ok, const QString& err) {
@@ -457,11 +460,15 @@ void VirtualDisplayJob::succeed(const VirtualDisplay::Result& res)
         m_ActiveHeight = asked.height;
         m_ActiveRefresh = asked.refreshMilliHz;
         m_ActiveHdr = asked.hdr;
+        m_ActiveExclusive = m_Request.exclusive;
         if (m_Request.exclusive) startGuard();
     } else if (m_Request.action == Action::Deactivate) {
         settings.clearVirtualDisplay();
         m_ActiveWidth = m_ActiveHeight = m_ActiveRefresh = 0;
         m_ActiveHdr = false;
+        m_ActiveExclusive = false;
+    } else if (m_Request.action == Action::OthersBack) {
+        m_ActiveExclusive = false;
     }
     setState(State::Done);
     settle(true, QString());

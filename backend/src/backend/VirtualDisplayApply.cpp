@@ -40,6 +40,7 @@
 #include <devguid.h>
 #include <cfgmgr32.h>
 #include <wincrypt.h>
+#include <wtsapi32.h>
 #include <vector>
 #endif
 
@@ -1284,6 +1285,118 @@ void setOthersOff(const Context& ctx, bool off)
         Logger::warning(QStringLiteral("[vdisplay-apply] cannot write %1").arg(f.fileName()));
 }
 
+QString exclusiveWantedPath(const Context& ctx)
+{
+    return ctx.dir + QStringLiteral("/exclusive-wanted.json");
+}
+
+std::optional<VirtualDisplay::ExclusiveWanted> readExclusiveWanted(const Context& ctx)
+{
+    QFile f(exclusiveWantedPath(ctx));
+    if (!f.exists() || !f.open(QIODevice::ReadOnly)) return std::nullopt;
+    return VirtualDisplay::parseExclusiveWanted(f.readAll());
+}
+
+bool writeExclusiveWanted(const Context& ctx, const VirtualDisplay::ExclusiveWanted& wanted)
+{
+    QFile f(exclusiveWantedPath(ctx));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        Logger::warning(QStringLiteral("[vdisplay-apply] cannot write %1").arg(f.fileName()));
+        return false;
+    }
+    f.write(VirtualDisplay::toJson(wanted));
+    return true;
+}
+
+bool isAccessDeniedError(const QString& error)
+{
+    return error.contains(QLatin1String("0x00000005"), Qt::CaseInsensitive);
+}
+
+QStringList activeDevicePaths()
+{
+    QStringList paths;
+    for (const ActivePath& p : activePaths())
+        paths.append(p.devicePath);
+    return paths;
+}
+
+/// Serializes exclusive-display file/CCD changes between stageMode and vdisplay-guard.
+struct ExclusiveLock
+{
+    HANDLE mutex = nullptr;
+    bool locked = false;
+
+    explicit ExclusiveLock(DWORD waitMs = 5000)
+    {
+        const auto m = QStringLiteral("Local\\%1 exclusive-op").arg(VirtualDisplay::displayName());
+        const std::wstring name = m.toStdWString();
+        mutex = CreateMutexW(nullptr, FALSE, name.c_str());
+        if (mutex) {
+            const DWORD w = WaitForSingleObject(mutex, waitMs);
+            locked = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+        }
+    }
+
+    ~ExclusiveLock()
+    {
+        if (locked && mutex) ReleaseMutex(mutex);
+        if (mutex) CloseHandle(mutex);
+    }
+
+    ExclusiveLock(const ExclusiveLock&) = delete;
+    ExclusiveLock& operator=(const ExclusiveLock&) = delete;
+};
+
+bool applyModeWithFallbacks(const ActivePath& target, int wantW, int wantH, int wantMilli,
+                            bool saveMode, const char* tag, bool* accessDenied = nullptr)
+{
+    QString error;
+    if (setMode(target.devicePath, wantW, wantH, wantMilli, saveMode, &error)) {
+        Logger::info(QStringLiteral("[%1] %2 set to %3x%4@%5")
+                         .arg(QLatin1String(tag), target.gdiName)
+                         .arg(wantW)
+                         .arg(wantH)
+                         .arg(VirtualDisplay::rateText(wantMilli)));
+        return true;
+    }
+    Logger::warning(QStringLiteral("[%1] mode %2x%3@%4 refused on %5: %6")
+                        .arg(QLatin1String(tag))
+                        .arg(wantW)
+                        .arg(wantH)
+                        .arg(VirtualDisplay::rateText(wantMilli), target.gdiName, error));
+    if (isAccessDeniedError(error)) {
+        if (accessDenied) *accessDenied = true;
+        return false;
+    }
+    const struct
+    {
+        int w, h, milli;
+    } fallbacks[] = {{VirtualDisplay::kWidth, VirtualDisplay::kHeight, wantMilli},
+                     {VirtualDisplay::kWidth, VirtualDisplay::kHeight,
+                      VirtualDisplay::kRateMax * VirtualDisplay::kMilliHz},
+                     {VirtualDisplay::kWidth, VirtualDisplay::kHeight,
+                      VirtualDisplay::kRefreshHz * VirtualDisplay::kMilliHz}};
+    for (const auto& f : fallbacks) {
+        if (f.w == wantW && f.h == wantH && f.milli == wantMilli) continue;
+        QString again;
+        if (!setMode(target.devicePath, f.w, f.h, f.milli, saveMode, &again)) {
+            if (isAccessDeniedError(again)) {
+                if (accessDenied) *accessDenied = true;
+                return false;
+            }
+            continue;
+        }
+        Logger::info(QStringLiteral("[%1] %2 fell back to %3x%4@%5")
+                         .arg(QLatin1String(tag), target.gdiName)
+                         .arg(f.w)
+                         .arg(f.h)
+                         .arg(VirtualDisplay::rateText(f.milli)));
+        return true;
+    }
+    return false;
+}
+
 // ── Stage "snapshot": the desktop half that runs before the node goes on ──
 
 int stageSnapshot(Context& ctx)
@@ -1321,6 +1434,8 @@ int stageMode(Context& ctx)
     const QString stage = QStringLiteral("mode");
 
     if (ctx.request.action == Action::Deactivate) {
+        ExclusiveLock lock;
+        QFile::remove(exclusiveWantedPath(ctx));
         ctx.result.ok = true;
         ctx.result.stage = stage;
         const bool wereOff = othersOff(ctx);
@@ -1386,6 +1501,8 @@ int stageMode(Context& ctx)
     // displays back, ours keeping its mode and the primary role, the node left
     // alone. The guests' capture restarts on its own, as for any display change.
     if (ctx.request.action == Action::OthersBack) {
+        ExclusiveLock lock;
+        QFile::remove(exclusiveWantedPath(ctx));
         if (othersOff(ctx)) {
             const auto target = findOurTarget();
             if (!target) return failAt(ctx, stage, QStringLiteral("the display is not on"));
@@ -1534,43 +1651,8 @@ int stageMode(Context& ctx)
     if (!VirtualDisplay::normaliseRate(wantMilli))
         wantMilli = VirtualDisplay::kRefreshHz * VirtualDisplay::kMilliHz;
     const bool saveMode = savesLayout(LayoutStep::Mode, off);
-    if (setMode(target->devicePath, wantW, wantH, wantMilli, saveMode, &error)) {
-        Logger::info(QStringLiteral("[vdisplay-apply] %1 set to %2x%3@%4")
-                         .arg(target->gdiName)
-                         .arg(wantW)
-                         .arg(wantH)
-                         .arg(VirtualDisplay::rateText(wantMilli)));
-    } else {
-        // Not fatal: the display exists and streams at whatever mode it has.
-        Logger::warning(QStringLiteral("[vdisplay-apply] mode %1x%2@%3 refused on %4: %5")
-                            .arg(wantW)
-                            .arg(wantH)
-                            .arg(VirtualDisplay::rateText(wantMilli))
-                            .arg(target->gdiName, error));
-        // The size first — a rate the client's screen runs at is worth more
-        // than its shape — then the product's own rate (a rate matched to the
-        // client's screen that the driver did not take), then the default
-        // mode entirely.
-        const struct
-        {
-            int w, h, milli;
-        } fallbacks[] = {{VirtualDisplay::kWidth, VirtualDisplay::kHeight, wantMilli},
-                         {VirtualDisplay::kWidth, VirtualDisplay::kHeight,
-                          VirtualDisplay::kRateMax * VirtualDisplay::kMilliHz},
-                         {VirtualDisplay::kWidth, VirtualDisplay::kHeight,
-                          VirtualDisplay::kRefreshHz * VirtualDisplay::kMilliHz}};
-        for (const auto& f : fallbacks) {
-            if (f.w == wantW && f.h == wantH && f.milli == wantMilli) continue;
-            QString again;
-            if (!setMode(target->devicePath, f.w, f.h, f.milli, saveMode, &again)) continue;
-            Logger::info(QStringLiteral("[vdisplay-apply] %1 fell back to %2x%3@%4")
-                             .arg(target->gdiName)
-                             .arg(f.w)
-                             .arg(f.h)
-                             .arg(VirtualDisplay::rateText(f.milli)));
-            break;
-        }
-    }
+    const bool modeOk =
+        applyModeWithFallbacks(*target, wantW, wantH, wantMilli, saveMode, "vdisplay-apply");
 
     // SDR: the same call scripts/Set-DisplayHdr.ps1 makes. The target ids may
     // have moved with the mode change, so look the display up again. HDR
@@ -1591,37 +1673,207 @@ int stageMode(Context& ctx)
     else if (hdr)
         Logger::info(QStringLiteral("[vdisplay-apply] HDR left on for a bench (MW_BENCH_VD_HDR)"));
 
+    bool primaryOk = true;
     if (ctx.request.benchSecondary)
         Logger::info(QStringLiteral("[vdisplay-apply] the primary display keeps its role, "
                                     "for a bench (MW_BENCH_VD_SECONDARY)"));
-    else if (!makePrimary(target->devicePath, savesLayout(LayoutStep::Primary, off), &error))
+    else if (!makePrimary(target->devicePath, savesLayout(LayoutStep::Primary, off), &error)) {
+        primaryOk = false;
         Logger::warning(QStringLiteral("[vdisplay-apply] not made primary: %1").arg(error));
+    }
 
     // Last, and never saved: every change above has been, with the other
     // displays on — the layout Windows replays whatever ends the stream.
-    if (ctx.request.exclusive && !off) {
-        // The marker first: a crash between the two leaves a marker with the
-        // displays on, which only spares a save.
-        setOthersOff(ctx, true);
-        const int n = keepOnlyOurs(target->devicePath, &error);
-        off = VirtualDisplay::othersOffAfter(LayoutStep::Exclusive, off, n >= 0);
-        if (n >= 0)
-            Logger::info(
-                QStringLiteral("[vdisplay-apply] exclusive: %1 other display(s) off").arg(n));
-        else
-            Logger::warning(
-                QStringLiteral("[vdisplay-apply] exclusive: the others stay on: %1").arg(error));
-        if (!off) setOthersOff(ctx, false);
-    } else if (off) {
-        // The layout from before could not be imposed again: the others stay
-        // off until the stream ends, whatever the option says now.
-        Logger::info(QStringLiteral("[vdisplay-apply] the other displays stay off until the "
-                                    "stream ends"));
+    if (ctx.request.exclusive) {
+        ExclusiveLock lock;
+        VirtualDisplay::ExclusiveWanted wanted;
+        wanted.width = wantW;
+        wanted.height = wantH;
+        wanted.refreshMilliHz = wantMilli;
+        wanted.benchSecondary = ctx.request.benchSecondary;
+        wanted.modePending = !modeOk || !primaryOk;
+        writeExclusiveWanted(ctx, wanted);
+
+        const bool otherActive =
+            VirtualDisplay::hasOtherActiveDisplays(activeDevicePaths(), target->devicePath);
+        if (!off || otherActive) {
+            // The marker first: a crash between the two leaves a marker with
+            // the displays on, which only spares a save.
+            setOthersOff(ctx, true);
+            const int n = keepOnlyOurs(target->devicePath, &error);
+            off = VirtualDisplay::othersOffAfter(LayoutStep::Exclusive, off, n >= 0);
+            if (n >= 0) {
+                Logger::info(
+                    QStringLiteral("[vdisplay-apply] exclusive: %1 other display(s) off").arg(n));
+            } else {
+                const auto msg = QStringLiteral("[vdisplay-apply] others stay on: %1").arg(error);
+                Logger::warning(msg);
+            }
+            if (!off) setOthersOff(ctx, false);
+        } else {
+            Logger::info(QStringLiteral(
+                "[vdisplay-apply] the other displays stay off until the stream ends"));
+        }
+    } else {
+        ExclusiveLock lock;
+        QFile::remove(exclusiveWantedPath(ctx));
+        if (off) {
+            // The layout from before could not be imposed again: the others stay
+            // off until the stream ends, whatever the option says now.
+            Logger::info(QStringLiteral("[vdisplay-apply] the other displays stay off until the "
+                                        "stream ends"));
+        }
     }
 
     ctx.result.ok = true;
     ctx.result.stage = QStringLiteral("done");
     return finish(ctx);
+}
+
+struct GuardWindowState
+{
+    bool sessionUnlocked = false;
+    bool sessionLocked = false;
+};
+
+LRESULT CALLBACK guardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_NCCREATE) {
+        const auto* cs = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        if (cs) {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        }
+        return TRUE;
+    }
+    auto* st = reinterpret_cast<GuardWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (st && msg == WM_WTSSESSION_CHANGE) {
+        if (wParam == WTS_SESSION_UNLOCK) {
+            st->sessionUnlocked = true;
+            st->sessionLocked = false;
+        } else if (wParam == WTS_SESSION_LOCK) {
+            st->sessionLocked = true;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/// Hidden top-level window so Windows delivers WM_DISPLAYCHANGE and
+/// WM_WTSSESSION_CHANGE (HWND_MESSAGE receives neither) to guard().
+struct GuardWindow
+{
+    HWND hwnd = nullptr;
+    ATOM cls = 0;
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    bool wtsRegistered = false;
+    GuardWindowState state;
+
+    GuardWindow()
+    {
+        const std::wstring clsW = QStringLiteral("MoonlightWebVDisplayGuard_%1")
+                                      .arg(GetCurrentProcessId())
+                                      .toStdWString();
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = &guardWndProc;
+        wc.hInstance = inst;
+        wc.lpszClassName = clsW.c_str();
+        cls = RegisterClassExW(&wc);
+        if (!cls) return;
+        hwnd = CreateWindowExW(0, MAKEINTATOM(cls), L"", WS_POPUP, -32000, -32000, 1, 1, nullptr,
+                               nullptr, inst, &state);
+        if (hwnd) {
+            wtsRegistered = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
+        }
+    }
+
+    ~GuardWindow()
+    {
+        if (wtsRegistered && hwnd) WTSUnRegisterSessionNotification(hwnd);
+        if (hwnd) DestroyWindow(hwnd);
+        if (cls) UnregisterClassW(MAKEINTATOM(cls), inst);
+    }
+
+    void pump()
+    {
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    GuardWindow(const GuardWindow&) = delete;
+    GuardWindow& operator=(const GuardWindow&) = delete;
+};
+
+void guardEnforceStep(Context& ctx, bool* accessDenied, bool* didWork)
+{
+    *accessDenied = false;
+    *didWork = false;
+    ExclusiveLock lock(200);
+    if (!lock.locked) return;
+    auto wanted = readExclusiveWanted(ctx);
+    if (!wanted) return;
+    auto target = findOurTarget();
+    if (!target) return;
+
+    bool otherActive =
+        VirtualDisplay::hasOtherActiveDisplays(activeDevicePaths(), target->devicePath);
+    if (!wanted->modePending && !otherActive) return;
+
+    bool off = othersOff(ctx);
+    if (wanted->modePending) {
+        int wantW = wanted->width, wantH = wanted->height;
+        if (!VirtualDisplay::normaliseMode(wantW, wantH)) {
+            wantW = VirtualDisplay::kWidth;
+            wantH = VirtualDisplay::kHeight;
+        }
+        int wantMilli = wanted->refreshMilliHz;
+        if (!VirtualDisplay::normaliseRate(wantMilli))
+            wantMilli = VirtualDisplay::kRefreshHz * VirtualDisplay::kMilliHz;
+
+        *didWork = true;
+        const bool saveMode = VirtualDisplay::savesLayout(VirtualDisplay::LayoutStep::Mode, off);
+        bool denied = false;
+        applyModeWithFallbacks(*target, wantW, wantH, wantMilli, saveMode, "vdisplay-guard",
+                               &denied);
+        if (auto again = findOurTarget()) target = again;
+        if (!wanted->benchSecondary) {
+            QString err;
+            if (!makePrimary(target->devicePath,
+                             VirtualDisplay::savesLayout(VirtualDisplay::LayoutStep::Primary, off),
+                             &err)) {
+                if (isAccessDeniedError(err)) denied = true;
+                Logger::warning(QStringLiteral("[vdisplay-guard] not made primary: %1").arg(err));
+            }
+        }
+        if (denied) {
+            *accessDenied = true;
+            return;
+        }
+        wanted->modePending = false;
+        writeExclusiveWanted(ctx, *wanted);
+        if (auto again = findOurTarget()) target = again;
+        otherActive =
+            VirtualDisplay::hasOtherActiveDisplays(activeDevicePaths(), target->devicePath);
+    }
+
+    if (otherActive) {
+        *didWork = true;
+        QString err;
+        setOthersOff(ctx, true);
+        const int n = keepOnlyOurs(target->devicePath, &err);
+        off = VirtualDisplay::othersOffAfter(VirtualDisplay::LayoutStep::Exclusive, off, n >= 0);
+        if (n >= 0) {
+            Logger::info(
+                QStringLiteral("[vdisplay-guard] exclusive: %1 re-attached display(s) off").arg(n));
+        } else {
+            if (isAccessDeniedError(err)) *accessDenied = true;
+            Logger::warning(
+                QStringLiteral("[vdisplay-guard] exclusive: the others stay on: %1").arg(err));
+        }
+        if (!off) setOthersOff(ctx, false);
+    }
 }
 
 #endif // Q_OS_WIN
@@ -1739,13 +1991,22 @@ int guard(const QString& server)
     Logger::info(QStringLiteral("[vdisplay-guard] watching the server (pid %1)%2")
                      .arg(pid)
                      .arg(proc ? QString() : QStringLiteral(" — already gone")));
+    GuardWindow wnd;
+    QElapsedTimer clock;
+    clock.start();
+    qint64 pausedUntilMs = -1;
+    QList<qint64> recentActionTimesMs;
+    bool loggedLockedWait = false;
+    bool loggedFlickerPause = false;
     int rc = kExitOk;
     for (;;) {
-        const bool alive = proc && WaitForSingleObject(proc, 1000) == WAIT_TIMEOUT;
+        wnd.pump();
+        const bool alive = proc && WaitForSingleObject(proc, 0) == WAIT_TIMEOUT;
         const VirtualDisplay::GuardStep step =
             VirtualDisplay::guardStep(alive, othersOffReadable());
-        if (step == VirtualDisplay::GuardStep::Wait) continue;
         if (step == VirtualDisplay::GuardStep::Restore) {
+            ExclusiveLock lock;
+            QFile::remove(exclusiveWantedPath(ctx));
             Logger::warning(QStringLiteral("[vdisplay-guard] the server is gone with the other "
                                            "displays off — bringing them back"));
             VirtualDisplay::Request req;
@@ -1760,8 +2021,81 @@ int guard(const QString& server)
                     QStringLiteral("[vdisplay-guard] cannot write %1").arg(f.fileName()));
                 rc = kExitFailed;
             }
+            break;
         }
-        break;
+        const auto wanted = readExclusiveWanted(ctx);
+        if (step == VirtualDisplay::GuardStep::Leave && (!alive || !wanted)) {
+            if (!alive) QFile::remove(exclusiveWantedPath(ctx));
+            break;
+        }
+
+        if (wnd.state.sessionUnlocked) {
+            wnd.state.sessionUnlocked = false;
+            pausedUntilMs = -1;
+            recentActionTimesMs.clear();
+            loggedLockedWait = false;
+            loggedFlickerPause = false;
+        }
+
+        bool modePending = wanted && wanted->modePending;
+        if (wanted) {
+            const qint64 nowMs = clock.elapsed();
+            const bool allowAttempt =
+                !wnd.state.sessionLocked && (pausedUntilMs < 0 || nowMs >= pausedUntilMs);
+            if (allowAttempt) {
+                const auto target = findOurTarget();
+                const QString ours = target ? target->devicePath : QString();
+                const QStringList devs = activeDevicePaths();
+                const bool otherActive = VirtualDisplay::hasOtherActiveDisplays(devs, ours);
+                if (VirtualDisplay::shouldGuardEnforce(alive, true, otherActive,
+                                                       wanted->modePending)) {
+                    bool denied = false;
+                    bool didWork = false;
+                    guardEnforceStep(ctx, &denied, &didWork);
+                    const auto refreshed = readExclusiveWanted(ctx);
+                    modePending = refreshed && refreshed->modePending;
+                    if (denied) {
+                        pausedUntilMs = clock.elapsed() + 5000;
+                        if (!loggedLockedWait) {
+                            loggedLockedWait = true;
+                            Logger::info(QStringLiteral(
+                                "[vdisplay-guard] waiting for session unlock before changing "
+                                "displays"));
+                        }
+                    } else if (didWork) {
+                        loggedLockedWait = false;
+                        const qint64 doneMs = clock.elapsed();
+                        recentActionTimesMs.append(doneMs);
+                        while (!recentActionTimesMs.isEmpty() &&
+                               doneMs - recentActionTimesMs.first() > 15000)
+                            recentActionTimesMs.removeFirst();
+                        if (recentActionTimesMs.size() >= 6) {
+                            pausedUntilMs = doneMs + 10000;
+                            recentActionTimesMs.clear();
+                            if (!loggedFlickerPause) {
+                                loggedFlickerPause = true;
+                                Logger::warning(QStringLiteral(
+                                    "[vdisplay-guard] display re-attached repeatedly — pausing "
+                                    "enforcement for 10s to avoid flicker"));
+                            }
+                        } else {
+                            pausedUntilMs = doneMs + 250;
+                            loggedFlickerPause = false;
+                        }
+                    }
+                }
+            }
+        } else {
+            pausedUntilMs = -1;
+            loggedLockedWait = false;
+            loggedFlickerPause = false;
+        }
+
+        const int pollMs = VirtualDisplay::guardPollIntervalMs(wanted.has_value(), modePending);
+        HANDLE handles[] = {proc};
+        const DWORD waitRes = MsgWaitForMultipleObjects(proc ? 1 : 0, proc ? handles : nullptr,
+                                                        FALSE, DWORD(pollMs), QS_ALLINPUT);
+        if (waitRes == WAIT_OBJECT_0 && proc) continue;
     }
     if (proc) CloseHandle(proc);
     if (single) CloseHandle(single);

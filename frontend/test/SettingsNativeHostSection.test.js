@@ -125,4 +125,19 @@ describe('SettingsView: the MoonlightWeb Host section', () => {
         expect(view.container.querySelectorAll('#settings-audio-source')).toHaveLength(1);
         expect(view.container.querySelectorAll('#settings-others-off')).toHaveLength(1);
     });
+
+    it('locks the checkbox on when the host admin enforces turning off other screens', () => {
+        view._othersOff = false;
+        view._othersOffOffer = { inherited: false, enforced: true };
+        mount();
+        const box = $('#settings-others-off');
+        expect(box.checked).toBe(true);
+        expect(box.disabled).toBe(true);
+        expect(section().textContent).toContain('text:settings.othersOffEnforcedDesc');
+
+        box.checked = false;
+        box.dispatchEvent(new Event('change'));
+        expect(view._othersOff).toBe(false);
+        expect(view._autoSave).not.toHaveBeenCalled();
+    });
 });

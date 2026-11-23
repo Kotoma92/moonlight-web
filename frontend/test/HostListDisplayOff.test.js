@@ -106,11 +106,16 @@ describe('the other screens box of the streaming settings', () => {
         expect(othersOffOffer([native({ allowed: true, inherited: true })])).toEqual({
             inherited: true,
         });
+        expect(othersOffOffer([native({ allowed: true, inherited: false, enforced: true })])).toEqual({
+            inherited: false,
+            enforced: true,
+        });
     });
 
-    it('shows the browser its own choice, else the PC inherited default', () => {
+    it('shows the browser its own choice, else the PC inherited default, or checked when enforced', () => {
         expect(othersOffChecked(true, { inherited: false })).toBe(true);
         expect(othersOffChecked(false, { inherited: true })).toBe(false);
+        expect(othersOffChecked(false, { inherited: false, enforced: true })).toBe(true);
         expect(othersOffChecked(null, { inherited: true })).toBe(true);
         expect(othersOffChecked(null, { inherited: false })).toBe(false);
         expect(othersOffChecked(undefined, null)).toBe(false);

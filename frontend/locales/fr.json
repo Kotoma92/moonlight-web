@@ -598,6 +598,7 @@
         "quitAppOnStopDesc": "Désactivé : arrêter le stream laisse le jeu tourner sur l'hôte, et sa tuile propose de le reprendre ou de le quitter, comme Moonlight. Activé : arrêter le stream ferme aussi le jeu.",
         "othersOff": "Éteindre les autres écrans de l'hôte",
         "othersOffDesc": "Pendant votre stream sur son écran virtuel, les autres écrans du PC s'éteignent ; ils se rallument quand vous partez. L'admin de l'hôte l'autorise. S'ils restent noirs : Windows+P, Étendre.",
+        "othersOffEnforcedDesc": "Imposé par l'admin de l'hôte : pendant votre stream sur son écran virtuel, les autres écrans du PC restent éteints et se rallument quand vous partez. S'ils restent noirs : Windows+P, Étendre.",
         "fullscreenOnStart": "Démarrer les streams en plein écran",
         "fullscreenOnStartDesc": "Le stream s'ouvre en plein écran dès son lancement. Sur iPhone, Safari garde ses barres : le stream remplit alors la page (ajoute MoonlightWeb à l'écran d'accueil pour un vrai plein écran)."
     },
@@ -631,6 +632,10 @@
         "vdExclusiveDesc": "Hôte natif, écran virtuel seulement. Chaque navigateur le choisit ensuite dans ses réglages de stream. Pendant son stream, les autres écrans de ce PC s'éteignent ; ils se rallument quand il part. Jamais pour les invités. Si un invité streame déjà quand un stream commence, les écrans restent allumés jusqu'au suivant. S'ils restent noirs : Windows+P, Étendre.",
         "vdExclusiveOn": "Autorisé au prochain stream",
         "vdExclusiveOff": "Interdit au prochain stream",
+        "vdExclusiveEnforced": "Imposer pour tous les streams du propriétaire (ignorer le réglage par navigateur)",
+        "vdExclusiveEnforcedDesc": "Activé : chaque stream du propriétaire sur l'écran virtuel éteint automatiquement les autres écrans depuis n'importe quel navigateur. Désactivé : chaque navigateur choisit individuellement dans ses réglages de stream.",
+        "vdExclusiveEnforcedOn": "Imposé pour tous les streams du propriétaire au prochain stream",
+        "vdExclusiveEnforcedOff": "Chaque navigateur choisit individuellement au prochain stream",
         "rdpReturn": "Ramener sur l'écran de ce PC, verrouillée, une session quittée par le Bureau à distance",
         "rdpReturnDesc": "Windows. Fermer le Bureau à distance laisse votre session sans écran : ce PC ne peut plus la streamer. Activé, sa carte propose « Écran de ce PC » : l'ouvrir remet la session sur l'écran de ce PC, la verrouille aussitôt et la streame. Déverrouillez-la depuis le stream avec votre code PIN ou votre mot de passe. Jamais quand quelqu'un d'autre est connecté sur le PC.",
         "rdpReturnOn": "Une session quittée par le Bureau à distance revient sur l'écran de ce PC quand vous la streamez",
