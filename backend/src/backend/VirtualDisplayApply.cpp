@@ -1351,7 +1351,7 @@ struct ExclusiveLock
 };
 
 bool applyModeWithFallbacks(const ActivePath& target, int wantW, int wantH, int wantMilli,
-                            bool saveMode, const wchar_t* tag, bool* accessDenied = nullptr)
+                            bool saveMode, const char* tag, bool* accessDenied = nullptr)
 {
     QString error;
     if (setMode(target.devicePath, wantW, wantH, wantMilli, saveMode, &error)) {
