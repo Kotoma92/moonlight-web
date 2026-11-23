@@ -1328,6 +1328,7 @@ export class SettingsView {
     _renderNativeHostSection() {
         const audioSource = this._audioSourceSupported;
         const othersOff = !!this._othersOffOffer;
+        const othersOffEnforced = this._othersOffOffer?.enforced === true;
         if (!audioSource && !othersOff) return '';
         return `
                 <div class="settings-section" id="settings-section-native-host">
@@ -1353,12 +1354,17 @@ export class SettingsView {
                     <div class="settings-field" id="settings-others-off-field">
                         <label class="settings-checkbox-label">
                             <input type="checkbox" id="settings-others-off"
-                                ${othersOffChecked(this._othersOff, this._othersOffOffer) ? 'checked' : ''} />
+                                ${othersOffChecked(this._othersOff, this._othersOffOffer) ? 'checked' : ''}
+                                ${othersOffEnforced ? 'disabled' : ''} />
                             <span class="settings-checkbox-text">
                                 <strong>${t('settings.othersOff')}</strong>
                             </span>
                         </label>
-                        <span class="setting-desc">${t('settings.othersOffDesc')}</span>
+                        <span class="setting-desc">${t(
+                            othersOffEnforced
+                                ? 'settings.othersOffEnforcedDesc'
+                                : 'settings.othersOffDesc',
+                        )}</span>
                     </div>`
                             : ''
                     }
@@ -2863,6 +2869,7 @@ export class SettingsView {
         const othersOffCheck = this.container.querySelector('#settings-others-off');
         if (othersOffCheck)
             othersOffCheck.addEventListener('change', () => {
+                if (this._othersOffOffer?.enforced) return;
                 this._othersOff = othersOffCheck.checked;
                 this._autoSave();
             });

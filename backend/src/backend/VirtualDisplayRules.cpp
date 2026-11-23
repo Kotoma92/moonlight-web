@@ -167,9 +167,11 @@ bool othersGoOff(Asker asker, bool optionOn, bool guestOn, bool othersOff)
     return asker == Asker::Owner && optionOn && (!guestOn || othersOff);
 }
 
-bool ownerWantsOthersOff(bool allowed, bool hasChoice, bool choice, bool inherited)
+bool ownerWantsOthersOff(bool allowed, bool hasChoice, bool choice, bool inherited,
+                         bool enforced)
 {
-    return allowed && (hasChoice ? choice : inherited);
+    if (!allowed) return false;
+    return enforced || (hasChoice ? choice : inherited);
 }
 
 QList<int> darkDisplays(const QList<int>& lit, const QList<int>& listed, bool othersOff)
@@ -203,6 +205,97 @@ GuardStep guardStep(bool serverAlive, bool othersOff)
 {
     if (!othersOff) return GuardStep::Leave;
     return serverAlive ? GuardStep::Wait : GuardStep::Restore;
+}
+
+namespace {
+
+bool readNonNegIntField(const QJsonObject& obj, QLatin1String key, int* out, QString* error)
+{
+    const QJsonValue v = obj.value(key);
+    if (v.isUndefined()) return true;
+    if (!v.isDouble()) {
+        if (error) *error = QStringLiteral("%1 must be an integer").arg(key);
+        return false;
+    }
+    const double d = v.toDouble();
+    const int n = v.toInt(-1);
+    if (d < 0.0 || d > 2147483647.0 || double(n) != d) {
+        if (error) *error = QStringLiteral("%1 must be a non-negative integer").arg(key);
+        return false;
+    }
+    *out = n;
+    return true;
+}
+
+bool readBoolField(const QJsonObject& obj, QLatin1String key, bool* out, QString* error)
+{
+    const QJsonValue v = obj.value(key);
+    if (v.isUndefined()) return true;
+    if (!v.isBool()) {
+        if (error) *error = QStringLiteral("%1 must be a boolean").arg(key);
+        return false;
+    }
+    *out = v.toBool();
+    return true;
+}
+
+} // namespace
+
+std::optional<ExclusiveWanted> parseExclusiveWanted(const QByteArray& json, QString* error)
+{
+    QJsonParseError parseErr;
+    const QJsonDocument doc = QJsonDocument::fromJson(json, &parseErr);
+    if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
+        if (error) *error = QStringLiteral("exclusive state must be a JSON object");
+        return std::nullopt;
+    }
+    const QJsonObject obj = doc.object();
+    ExclusiveWanted w;
+    if (!readNonNegIntField(obj, QLatin1String("width"), &w.width, error) ||
+        !readNonNegIntField(obj, QLatin1String("height"), &w.height, error) ||
+        !readNonNegIntField(obj, QLatin1String("refresh_mhz"), &w.refreshMilliHz, error) ||
+        !readBoolField(obj, QLatin1String("bench_secondary"), &w.benchSecondary, error) ||
+        !readBoolField(obj, QLatin1String("mode_pending"), &w.modePending, error)) {
+        return std::nullopt;
+    }
+    return w;
+}
+
+QByteArray toJson(const ExclusiveWanted& wanted)
+{
+    QJsonObject obj;
+    if (wanted.width > 0) obj[QLatin1String("width")] = wanted.width;
+    if (wanted.height > 0) obj[QLatin1String("height")] = wanted.height;
+    if (wanted.refreshMilliHz > 0) obj[QLatin1String("refresh_mhz")] = wanted.refreshMilliHz;
+    if (wanted.benchSecondary) obj[QLatin1String("bench_secondary")] = true;
+    if (wanted.modePending) obj[QLatin1String("mode_pending")] = true;
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact);
+}
+
+bool hasOtherActiveDisplays(const QStringList& activeDevicePaths, const QString& ourDevicePath)
+{
+    if (ourDevicePath.isEmpty()) return false;
+    bool foundOurs = false;
+    bool foundOther = false;
+    for (const QString& path : activeDevicePaths) {
+        if (path.compare(ourDevicePath, Qt::CaseInsensitive) == 0)
+            foundOurs = true;
+        else
+            foundOther = true;
+    }
+    return foundOurs && foundOther;
+}
+
+bool shouldGuardEnforce(bool serverAlive, bool exclusiveWanted, bool hasOtherActive,
+                        bool modePending)
+{
+    return serverAlive && exclusiveWanted && (hasOtherActive || modePending);
+}
+
+int guardPollIntervalMs(bool exclusiveWanted, bool modePending)
+{
+    if (modePending) return 250;
+    return exclusiveWanted ? 500 : 1000;
 }
 
 bool othersOffAfter(LayoutStep step, bool othersOff, bool ok)

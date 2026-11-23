@@ -461,6 +461,7 @@ QJsonObject ComputerManager::nativeDisplayJson()
         obj["others_off"] = QJsonObject{
             {QStringLiteral("allowed"), offered && settings.virtualDisplayExclusive()},
             {QStringLiteral("inherited"), settings.virtualDisplayExclusiveInherited()},
+            {QStringLiteral("enforced"), settings.virtualDisplayExclusiveEnforced()},
         };
     }
     // The HID passthrough's verdict for Settings' « As itself » switch, before

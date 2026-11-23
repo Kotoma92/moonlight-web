@@ -142,6 +142,7 @@ export class AdminView {
         // (issue #39). Offered on Windows once the display is installed.
         this._vdExclusiveSupported = false;
         this._vdExclusive = false;
+        this._vdExclusiveEnforced = true;
         this._rdpReturnSupported = false;
         this._rdpReturn = true;
         // This PC's keyboard layout for the touch keyboard's text (issue #44).
@@ -270,6 +271,7 @@ export class AdminView {
             this._packetMarking = admin.packet_marking !== false;
             this._vdExclusiveSupported = admin.virtual_display_exclusive_supported === true;
             this._vdExclusive = admin.virtual_display_exclusive === true;
+            this._vdExclusiveEnforced = admin.virtual_display_exclusive_enforced !== false;
             this._rdpReturnSupported = admin.remote_desktop_return_supported === true;
             this._rdpReturn = admin.remote_desktop_return !== false;
             this._hostLayoutOffered = admin.keyboard_host_layout_offered === true;
@@ -1836,17 +1838,39 @@ export class AdminView {
         // ── Other screens off on the virtual display ───────────────────────
         // Saved on the spot; the next stream's virtual display reads it.
         const exclusiveChk = this.container.querySelector('#chk-vd-exclusive');
+        const exclusiveEnforcedChk = this.container.querySelector('#chk-vd-exclusive-enforced');
         if (exclusiveChk) {
             exclusiveChk.addEventListener('change', async () => {
                 const enabled = exclusiveChk.checked;
                 try {
                     await BackendClient.saveAdminSettings({ virtual_display_exclusive: enabled });
                     this._vdExclusive = enabled;
+                    if (exclusiveEnforcedChk) exclusiveEnforcedChk.disabled = !enabled;
                     Toast.success(enabled ? t('admin.vdExclusiveOn') : t('admin.vdExclusiveOff'));
                 } catch (err) {
                     console.error('[Admin] Failed to save the other screens option:', err);
                     Toast.error(t('admin.saveFailed', { message: err.message }));
                     exclusiveChk.checked = !enabled; // revert
+                }
+            });
+        }
+        if (exclusiveEnforcedChk) {
+            exclusiveEnforcedChk.addEventListener('change', async () => {
+                const enforced = exclusiveEnforcedChk.checked;
+                try {
+                    await BackendClient.saveAdminSettings({
+                        virtual_display_exclusive_enforced: enforced,
+                    });
+                    this._vdExclusiveEnforced = enforced;
+                    Toast.success(
+                        enforced
+                            ? t('admin.vdExclusiveEnforcedOn')
+                            : t('admin.vdExclusiveEnforcedOff'),
+                    );
+                } catch (err) {
+                    console.error('[Admin] Failed to save the enforced screens option:', err);
+                    Toast.error(t('admin.saveFailed', { message: err.message }));
+                    exclusiveEnforcedChk.checked = !enforced; // revert
                 }
             });
         }
@@ -2513,6 +2537,13 @@ export class AdminView {
                             <span class="settings-checkbox-text">${t('admin.vdExclusive')}</span>
                         </label>
                         <p class="setting-desc">${t('admin.vdExclusiveDesc')}</p>
+                        <label class="settings-checkbox-label" style="margin-top: 8px; margin-left: 24px;">
+                            <input type="checkbox" id="chk-vd-exclusive-enforced"
+                                   ${this._vdExclusiveEnforced ? 'checked' : ''}
+                                   ${this._vdExclusive ? '' : 'disabled'} />
+                            <span class="settings-checkbox-text">${t('admin.vdExclusiveEnforced')}</span>
+                        </label>
+                        <p class="setting-desc" style="margin-left: 24px;">${t('admin.vdExclusiveEnforcedDesc')}</p>
                     </div>`
                             : ''
                     }

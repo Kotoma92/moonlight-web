@@ -33,13 +33,18 @@ export function othersOffOffer(hosts) {
     if (!Array.isArray(hosts)) return null;
     for (const host of hosts) {
         const block = othersOffOf(host);
-        if (block?.allowed === true) return { inherited: block.inherited === true };
+        if (block?.allowed === true) {
+            const offer = { inherited: block.inherited === true };
+            if (block.enforced === true) offer.enforced = true;
+            return offer;
+        }
     }
     return null;
 }
 
-/** Whether the box shows ticked: the browser's choice, else the inherited default. */
+/** Whether the box shows ticked: enforced on the host, else the browser's choice, else the inherited default. */
 export function othersOffChecked(choice, offer) {
+    if (offer?.enforced === true) return true;
     if (typeof choice === 'boolean') return choice;
     return offer?.inherited === true;
 }

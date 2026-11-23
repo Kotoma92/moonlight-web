@@ -77,6 +77,11 @@ QString othersOffPath()
     return stagingDir() + QStringLiteral("/others-off");
 }
 
+QString exclusiveWantedPath()
+{
+    return stagingDir() + QStringLiteral("/exclusive-wanted.json");
+}
+
 QString bundledDriverDir()
 {
     return QCoreApplication::applicationDirPath() + QStringLiteral("/drivers/vdd");

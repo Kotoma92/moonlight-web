@@ -1070,6 +1070,7 @@ void registerSystemRoutes(HttpServer& server, AppSettings& appSettings, AuthMana
         obj["virtual_display_exclusive_supported"] = false;
 #endif
         obj["virtual_display_exclusive"] = appSettings.virtualDisplayExclusive();
+        obj["virtual_display_exclusive_enforced"] = appSettings.virtualDisplayExclusiveEnforced();
         // A session left by Remote Desktop goes back to this PC's screen,
         // locked: offered where the launcher service can do it, in a version
         // that offers it (RemoteDesktopReturnPolicy::kReturnOffered).
@@ -1178,6 +1179,12 @@ void registerSystemRoutes(HttpServer& server, AppSettings& appSettings, AuthMana
             const bool enabled = body["virtual_display_exclusive"].toBool();
             appSettings.setVirtualDisplayExclusive(enabled);
             obj["virtual_display_exclusive"] = enabled;
+            hadChange = true;
+        }
+        if (body.contains("virtual_display_exclusive_enforced")) {
+            const bool enforced = body["virtual_display_exclusive_enforced"].toBool();
+            appSettings.setVirtualDisplayExclusiveEnforced(enforced);
+            obj["virtual_display_exclusive_enforced"] = enforced;
             hadChange = true;
         }
 

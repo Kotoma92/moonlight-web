@@ -915,7 +915,13 @@ void run_virtual_display_tests()
     for (const bool has : {false, true})
         for (const bool choice : {false, true})
             for (const bool inherited : {false, true})
-                CHECK(!ownerWantsOthersOff(false, has, choice, inherited));
+                for (const bool enforced : {false, true})
+                    CHECK(!ownerWantsOthersOff(false, has, choice, inherited, enforced));
+    // Enforced on host: always true when allowed, ignoring per-browser choice.
+    for (const bool has : {false, true})
+        for (const bool choice : {false, true})
+            for (const bool inherited : {false, true})
+                CHECK(ownerWantsOthersOff(true, has, choice, inherited, true));
 
     SECTION("VirtualDisplay — the cards of the displays a stream turned off");
     CHECK(darkDisplays({1, 2, 3}, {1}, true) == QList<int>({2, 3}));
@@ -952,4 +958,49 @@ void run_virtual_display_tests()
     CHECK(guardStep(true, false) == GuardStep::Leave);
     CHECK(guardStep(false, false) == GuardStep::Leave);
     CHECK_EQ(guardArgument(), QStringLiteral("--vdisplay-guard"));
+
+    SECTION("VirtualDisplay — ExclusiveWanted state round-trip and validation");
+    {
+        const ExclusiveWanted empty;
+        const QByteArray json = toJson(empty);
+        CHECK_EQ(QString::fromUtf8(json), QStringLiteral("{}"));
+        const auto parsed = parseExclusiveWanted(json);
+        CHECK(parsed.has_value());
+        if (parsed) CHECK(*parsed == empty);
+
+        const ExclusiveWanted populated{2560, 1440, 120000, true, true};
+        const auto roundTrip = parseExclusiveWanted(toJson(populated));
+        CHECK(roundTrip.has_value());
+        if (roundTrip) CHECK(*roundTrip == populated);
+
+        QString err;
+        CHECK(!parseExclusiveWanted("not json", &err).has_value());
+        CHECK(!err.isEmpty());
+        CHECK(!parseExclusiveWanted("[]", &err).has_value());
+        CHECK(!parseExclusiveWanted("{\"width\":-1}", &err).has_value());
+        CHECK(!parseExclusiveWanted("{\"width\":1920.5}", &err).has_value());
+        CHECK(!parseExclusiveWanted("{\"width\":\"1920\"}", &err).has_value());
+        CHECK(!parseExclusiveWanted("{\"mode_pending\":\"yes\"}", &err).has_value());
+    }
+
+    SECTION("VirtualDisplay — guard enforcement predicates");
+    const QString ours = QStringLiteral("\\\\?\\DISPLAY#MTT1337#1&UID256");
+    const QString other = QStringLiteral("\\\\?\\DISPLAY#GSM5B7F#4&UID4123");
+    CHECK(hasOtherActiveDisplays({ours, other}, ours));
+    CHECK(hasOtherActiveDisplays({ours.toLower(), other}, ours));
+    CHECK(!hasOtherActiveDisplays({ours}, ours));
+    CHECK(!hasOtherActiveDisplays({other}, ours));
+    CHECK(!hasOtherActiveDisplays({}, ours));
+    CHECK(!hasOtherActiveDisplays({other}, QString()));
+
+    CHECK(shouldGuardEnforce(true, true, true, false));
+    CHECK(shouldGuardEnforce(true, true, false, true));
+    CHECK(shouldGuardEnforce(true, true, true, true));
+    CHECK(!shouldGuardEnforce(true, true, false, false));
+    CHECK(!shouldGuardEnforce(true, false, true, true));
+    CHECK(!shouldGuardEnforce(false, true, true, true));
+
+    CHECK_EQ(guardPollIntervalMs(true, true), 250);
+    CHECK_EQ(guardPollIntervalMs(true, false), 500);
+    CHECK_EQ(guardPollIntervalMs(false, false), 1000);
 }

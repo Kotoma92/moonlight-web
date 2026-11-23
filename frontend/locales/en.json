@@ -598,6 +598,7 @@
         "quitAppOnStopDesc": "Off: stopping the stream leaves the game running on the host, and its card offers to resume or quit it — like Moonlight. On: stopping the stream also closes the game.",
         "othersOff": "Turn off the host's other screens",
         "othersOffDesc": "While you stream its virtual display, the PC's other screens go dark; they come back when you leave. The host's admin allows it. If they stay dark: Windows+P, Extend.",
+        "othersOffEnforcedDesc": "Required by the host's admin: while you stream its virtual display, the PC's other screens stay off and come back when you leave. If they stay dark: Windows+P, Extend.",
         "fullscreenOnStart": "Start streams in fullscreen",
         "fullscreenOnStartDesc": "The stream opens in fullscreen as soon as you launch it. On an iPhone, Safari keeps its bars: the stream fills the page instead (add MoonlightWeb to the Home Screen for a true fullscreen)."
     },
@@ -631,6 +632,10 @@
         "vdExclusiveDesc": "Native host, virtual display only. Each browser then chooses it in its streaming settings. While its stream runs, this PC's other screens go dark; they come back when it leaves. Never for guests. If a guest is already streaming when a stream starts, the screens stay on until the next one. If they stay dark: Windows+P, Extend.",
         "vdExclusiveOn": "Allowed from the next stream",
         "vdExclusiveOff": "Not allowed from the next stream",
+        "vdExclusiveEnforced": "Enforce for all owner streams (ignore per-browser setting)",
+        "vdExclusiveEnforcedDesc": "On: every owner stream on the virtual display turns off the other screens from every browser automatically. Off: each browser chooses it individually in its streaming settings.",
+        "vdExclusiveEnforcedOn": "Enforced for all owner streams from the next stream",
+        "vdExclusiveEnforcedOff": "Each browser chooses individually from the next stream",
         "rdpReturn": "Bring a session left by Remote Desktop back to this PC's screen, locked",
         "rdpReturnDesc": "Windows. Closing Remote Desktop leaves your session with no screen, so this PC cannot stream it. With this on, its card offers \"This PC's screen\": opening it puts the session back on this PC's screen, locks it at once, and streams it. Unlock it from the stream with your PIN or password. Never while someone else is signed in on the PC.",
         "rdpReturnOn": "A session left by Remote Desktop comes back to this PC's screen when you stream it",

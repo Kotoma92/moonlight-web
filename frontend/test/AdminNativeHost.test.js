@@ -10,7 +10,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../js/api/BackendClient.js', () => ({
-    BackendClient: { getGamepadDriver: vi.fn(async () => ({})) },
+    BackendClient: {
+        getGamepadDriver: vi.fn(async () => ({})),
+        saveAdminSettings: vi.fn(async () => ({})),
+    },
 }));
 vi.mock('../js/ui/Toast.js', () => ({
     Toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
@@ -19,6 +22,7 @@ vi.mock('../js/i18n/i18n.js', () => ({
     t: (key) => 'text:' + key,
 }));
 
+import { BackendClient } from '../js/api/BackendClient.js';
 import { AdminView } from '../js/ui/AdminView.js';
 
 describe('AdminView — the MoonlightWeb Host section', () => {
@@ -98,11 +102,37 @@ describe('AdminView — the MoonlightWeb Host section', () => {
         const html = view._renderNativeHost();
         expect(html).toContain('chk-stream-notifications');
         expect(html).not.toContain('chk-vd-exclusive');
+        expect(html).not.toContain('chk-vd-exclusive-enforced');
         expect(html).not.toContain('select-video-pipeline');
         expect(html).not.toContain('admin-section-host-apps');
 
         view._hasAdminAccess = false;
         vi.spyOn(view, '_isLocalhost').mockReturnValue(false);
         expect(view._renderNativeHost()).toBe('');
+    });
+
+    it('lets the admin toggle host-enforced exclusive screens and persists it', async () => {
+        view._vdExclusiveSupported = true;
+        view._vdExclusive = false;
+        view.render();
+        view.bindEvents();
+        const excl = $('#chk-vd-exclusive');
+        const enforced = $('#chk-vd-exclusive-enforced');
+        expect(enforced.checked).toBe(true);
+        expect(enforced.disabled).toBe(true);
+
+        excl.checked = true;
+        excl.dispatchEvent(new Event('change'));
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(enforced.disabled).toBe(false);
+
+        enforced.checked = false;
+        enforced.dispatchEvent(new Event('change'));
+        await Promise.resolve();
+        expect(BackendClient.saveAdminSettings).toHaveBeenCalledWith({
+            virtual_display_exclusive_enforced: false,
+        });
+        expect(view._vdExclusiveEnforced).toBe(false);
     });
 });

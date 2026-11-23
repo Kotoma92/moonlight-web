@@ -559,6 +559,14 @@ public:
     // keeps its other displays going off until each viewer chooses.
     bool virtualDisplayExclusiveInherited() const;
 
+    // Enforced on the host regardless of each browser's Settings choice.
+    // Stored as JSON bool "virtual_display_exclusive_enforced", DEFAULT true:
+    // when virtualDisplayExclusive() is true, every owner stream on the
+    // virtual display turns off the host's other screens unless the admin
+    // unchecks this to let each browser choose.
+    bool virtualDisplayExclusiveEnforced() const;
+    void setVirtualDisplayExclusiveEnforced(bool enabled);
+
     // Stored as JSON string "virtual_display_gpu", DEFAULT "" (the driver's
     // own choice), set from the virtual display's card on a PC with several
     // GPUs: the GPU, by the name the OS gives it, that draws our virtual

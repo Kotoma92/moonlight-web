@@ -487,7 +487,8 @@ bool othersGoOff(Asker asker, bool optionOn, bool guestOn, bool othersOff);
 /// sent with the stream). A browser that never chose (@p hasChoice false) takes
 /// what the PC did before the choice moved to the viewer (@p inherited): on
 /// where the admin's box was already ticked, so an update changes nothing.
-bool ownerWantsOthersOff(bool allowed, bool hasChoice, bool choice, bool inherited);
+bool ownerWantsOthersOff(bool allowed, bool hasChoice, bool choice, bool inherited,
+                         bool enforced = false);
 
 /// The display cards drawn dark on the native host's card: with the other
 /// displays off (@p othersOff), the ones last seen lit (@p lit, in their
@@ -535,6 +536,45 @@ enum class GuardStep
     Restore, ///< the server is gone with them off: bring them back
 };
 GuardStep guardStep(bool serverAlive, bool othersOff);
+
+/// Desired exclusive-display state while an exclusive stream is active.
+/// Written by VirtualDisplayApply (`stageMode`) to exclusiveWantedPath() and
+/// removed before restoring displays (`Deactivate`, `OthersBack`, or server
+/// exit in `guard`).
+struct ExclusiveWanted
+{
+    int width = 0;
+    int height = 0;
+    int refreshMilliHz = 0;
+    bool benchSecondary = false;
+    bool modePending = false;
+
+    bool operator==(const ExclusiveWanted& o) const
+    {
+        return width == o.width && height == o.height &&
+               refreshMilliHz == o.refreshMilliHz && benchSecondary == o.benchSecondary &&
+               modePending == o.modePending;
+    }
+};
+
+std::optional<ExclusiveWanted> parseExclusiveWanted(const QByteArray& json,
+                                                    QString* error = nullptr);
+QByteArray toJson(const ExclusiveWanted& wanted);
+
+/// True when our virtual display is among @p activeDevicePaths AND at least one
+/// other active display path exists beside it.
+bool hasOtherActiveDisplays(const QStringList& activeDevicePaths,
+                            const QString& ourDevicePath);
+
+/// True while the Windows guard should enforce exclusive display state: the
+/// server is still alive, an exclusive stream wants other screens off, and
+/// either another screen re-attached or the initial mode/primary still needs
+/// applying (e.g. after unlocking the desktop).
+bool shouldGuardEnforce(bool serverAlive, bool exclusiveWanted, bool hasOtherActive,
+                        bool modePending);
+
+/// Wait interval in milliseconds for the Windows guard loop.
+int guardPollIntervalMs(bool exclusiveWanted, bool modePending);
 
 inline QString guardArgument()
 {
@@ -685,6 +725,8 @@ QString requestPath();
 QString resultPath();
 /// The helper's marker: an exclusive stream has the other displays off.
 QString othersOffPath();
+/// Desired exclusive-stream state watched by the Windows guard.
+QString exclusiveWantedPath();
 
 // ── Status ──────────────────────────────────────────────────────────────────
 
